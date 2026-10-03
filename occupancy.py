@@ -34,3 +34,28 @@ def frontal_and_global_occupancy(grid: np.ndarray):
     o_front = float(np.mean(front_block))
     o_global = float(np.mean(grid))
     return o_front, o_global
+
+
+_COL_POS = np.array([-1.0, -0.5, 0.0, 0.5, 1.0])  # left -> right across the 5 grid columns
+
+
+def avoidance_steer(grid: np.ndarray):
+    """
+    Perception-driven obstacle-avoidance signal derived straight from the
+    U-Net occupancy grid, independent of the reward function. Used by
+    airsim_env.py as a safety shield on the *executed* control command
+    (not on the reward), so it never changes the learning signal.
+
+    Returns:
+        steer_lr: in [-1, 1]. Positive = steer right (obstacle mass is
+                  weighted toward the left), negative = steer left.
+        danger:   in [0, 1]. Occupancy directly ahead (center 3 columns,
+                  all rows), used to scale how hard to steer/brake.
+    """
+    col_means = grid.mean(axis=0)  # shape (5,), left -> right
+    weight = float(col_means.sum()) + 1e-6
+    obstacle_bearing = float((col_means * _COL_POS).sum() / weight)  # -1 (left) .. +1 (right)
+    steer_lr = -obstacle_bearing
+
+    danger = float(grid[:, 1:4].mean())
+    return steer_lr, danger

@@ -53,7 +53,7 @@ R_SUCCESS = 2000.0
 R_COLLISION = -100.0
 R_TIMEOUT = -100.0
 SUCCESS_RADIUS = 1.0          # meters
-MAX_EPISODE_STEPS = 350
+MAX_EPISODE_STEPS = 1000
 OBS_FRONT_THRESHOLD = 0.3
 JERK_COEFF = 0.05
 YAW_ALIGN_COEFF = 0.2
@@ -64,6 +64,19 @@ OBS_FRONT_COEFF = 4.0
 OBS_GLOBAL_COEFF = 1.0
 PROGRESS_LINEAR_COEFF = 20.0
 PROGRESS_INVERSE_COEFF = 100.0
+
+# --------------------------------------------------------------------------
+# Perception-driven safety shield (airsim_env.py only -- does NOT touch the
+# reward function above). The reward still scores the agent on its own raw
+# action exactly as before; this just clamps what actually gets flown so the
+# U-Net occupancy grid can veto/soften a command that's about to fly straight
+# into an obstacle, instead of relying solely on the reward gradient to teach
+# that behavior over millions of steps.
+# --------------------------------------------------------------------------
+AVOID_DANGER_THRESHOLD = 0.25   # center-column occupancy (0-1) above which the shield engages
+AVOID_STEER_GAIN = 1.5          # added lateral (roll) correction at full danger severity
+AVOID_BRAKE_GAIN = 0.8          # fraction of forward pitch cut at full danger severity
+AVOID_STEER_SIGN = 1.0          # flip to -1.0 if the drone is observed steering toward obstacles instead of away
 
 # --------------------------------------------------------------------------
 # AirSim connection

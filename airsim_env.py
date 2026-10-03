@@ -29,7 +29,7 @@ import airsim
 
 import config
 from unet import ObstaclePerceptionModule
-from occupancy import pool_to_grid, flatten_grid
+from occupancy import pool_to_grid, flatten_grid, avoidance_steer
 from reward import compute_reward
 
 
@@ -64,6 +64,7 @@ class AirSimUAVEnv(gym.Env):
         self._target_z = -config.H_MAX
         self._prev_dist = None
         self._step_count = 0
+        self._last_grid = np.zeros((config.OCC_GRID, config.OCC_GRID), dtype=np.float32)
         self.trajectory = []  # populated during episodes for plotting/analysis
 
     # ------------------------------------------------------------------
@@ -97,6 +98,7 @@ class AirSimUAVEnv(gym.Env):
         self._prev_dist = math.sqrt(dx ** 2 + dy ** 2)
 
         grid = self._get_occupancy_grid()
+        self._last_grid = grid
         obs = self._build_state(grid, dx, dy, dz)
         self.trajectory.append(pos.copy())
 
@@ -111,8 +113,26 @@ class AirSimUAVEnv(gym.Env):
         cmd_target = action
         self._cmd_smooth = (1 - config.ALPHA_SMOOTH) * self._cmd_smooth + config.ALPHA_SMOOTH * cmd_target
 
-        roll_rad = math.radians(float(self._cmd_smooth[0]) * config.MAX_ROLL_DEG)
-        pitch_rad = math.radians(float(self._cmd_smooth[1]) * config.MAX_PITCH_DEG)
+        # Perception-driven safety shield: softens the *executed* roll/pitch
+        # using the U-Net occupancy grid from what the drone currently sees
+        # (self._last_grid, set at the end of the previous step/reset), so an
+        # action that would fly straight into an obstacle gets steered around
+        # it instead of relying purely on the reward gradient to learn that
+        # over millions of steps. The reward below still scores the agent's
+        # own raw action (a_roll, a_yaw_rate) exactly as before -- this only
+        # changes what actually gets flown.
+        exec_roll, exec_pitch = float(self._cmd_smooth[0]), float(self._cmd_smooth[1])
+        steer_lr, danger = avoidance_steer(self._last_grid)
+        if danger > config.AVOID_DANGER_THRESHOLD:
+            severity = min(1.0, (danger - config.AVOID_DANGER_THRESHOLD) / (1.0 - config.AVOID_DANGER_THRESHOLD))
+            exec_roll = float(np.clip(
+                exec_roll + config.AVOID_STEER_SIGN * config.AVOID_STEER_GAIN * severity * steer_lr,
+                -1.0, 1.0,
+            ))
+            exec_pitch = float(exec_pitch * (1.0 - config.AVOID_BRAKE_GAIN * severity))
+
+        roll_rad = math.radians(exec_roll * config.MAX_ROLL_DEG)
+        pitch_rad = math.radians(exec_pitch * config.MAX_PITCH_DEG)
         yaw_rate_rad = math.radians(float(self._cmd_smooth[2]) * config.OMEGA_MAX)
 
         # climb axis nudges a target-altitude set-point rather than jumping to
@@ -136,6 +156,7 @@ class AirSimUAVEnv(gym.Env):
         d_curr = math.sqrt(dx ** 2 + dy ** 2)
 
         grid = self._get_occupancy_grid()
+        self._last_grid = grid
         obs = self._build_state(grid, dx, dy, dz)
 
         body_velocity = self._get_body_velocity(yaw_deg)

@@ -6,8 +6,8 @@ Usage:
     # random goal each episode (generalizing policy)
     env\\Scripts\\python.exe train_ppo.py --timesteps 1000000 --alpha 0.01
 
-    # train to reach one fixed (x, y, z) NED destination
-    env\\Scripts\\python.exe train_ppo.py --timesteps 1000000 --alpha 0.01 --goal_x 25 --goal_y -40 --goal_z -15
+    # train to reach one fixed (x, y, z) NED destination => goal 131.94, -275.53, 0.5
+    env\\Scripts\\python.exe train_ppo.py --timesteps 1000000 --alpha 0.01 --goal_x 131.94 --goal_y -275.53 --goal_z 0.5
 """
 
 import argparse
