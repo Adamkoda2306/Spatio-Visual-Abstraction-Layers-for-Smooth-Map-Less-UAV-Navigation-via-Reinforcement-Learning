@@ -66,13 +66,9 @@ class EpisodeLogCallback(BaseCallback):
             collided = bool(info.get("collided"))
             timed_out = bool(info.get("timed_out"))
 
-            print(f"Episode {self.episode_count}")
-            print(f"Reward: {episode['r']:.2f}")
-            print(f"Steps: {episode['l']}")
-            print(f"Final distance: {final_dist:.2f} m")
-            print(f"Minimum distance: {min_dist:.2f} m")
-            print(f"SUCCESS: {success}")
-            print(f"COLLISION: {collided}")
+            print(f"Episode {self.episode_count}, Reward: {episode['r']:.2f}, Steps: {episode['l']}")
+            print(f"Final distance: {final_dist:.2f} m, Minimum distance: {min_dist:.2f} m")
+            print(f"STATUS => SUCCESS: {success}, COLLISION: {collided}, TIMEOUT: {timed_out}")
             print()
 
             self._append_csv(self._episode_csv_path, [
