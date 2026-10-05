@@ -65,6 +65,8 @@ class AirSimUAVEnv(gym.Env):
         self._prev_dist = None
         self._step_count = 0
         self._last_grid = np.zeros((config.OCC_GRID, config.OCC_GRID), dtype=np.float32)
+        self._danger_ema = 0.0
+        self._steer_ema = 0.0
         self.trajectory = []  # populated during episodes for plotting/analysis
 
     # ------------------------------------------------------------------
@@ -91,6 +93,8 @@ class AirSimUAVEnv(gym.Env):
 
         self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)
         self._step_count = 0
+        self._danger_ema = 0.0
+        self._steer_ema = 0.0
         self.trajectory = []
 
         pos, yaw_deg = self._get_pose()
@@ -121,15 +125,34 @@ class AirSimUAVEnv(gym.Env):
         # over millions of steps. The reward below still scores the agent's
         # own raw action (a_roll, a_yaw_rate) exactly as before -- this only
         # changes what actually gets flown.
+        #
+        # danger/steer are EMA-smoothed across steps before being used: a raw
+        # per-frame U-Net reading is noisy (lighting flicker, a leaf moving,
+        # slight pose jitter), and reacting to every single-frame blip is
+        # exactly what made the drone visibly shake in 3rd-person view. The
+        # EMA alpha is deliberately much faster than ALPHA_SMOOTH (which
+        # smooths the *raw action*, not this safety signal), so real,
+        # persistent obstacles are still reacted to within a few steps.
+        raw_steer, raw_danger = avoidance_steer(self._last_grid)
+        self._danger_ema += config.AVOID_EMA_ALPHA * (raw_danger - self._danger_ema)
+        self._steer_ema += config.AVOID_EMA_ALPHA * (raw_steer - self._steer_ema)
+        danger, steer_lr = self._danger_ema, self._steer_ema
+
         exec_roll, exec_pitch = float(self._cmd_smooth[0]), float(self._cmd_smooth[1])
-        steer_lr, danger = avoidance_steer(self._last_grid)
         if danger > config.AVOID_DANGER_THRESHOLD:
             severity = min(1.0, (danger - config.AVOID_DANGER_THRESHOLD) / (1.0 - config.AVOID_DANGER_THRESHOLD))
+            severity = severity ** 0.5  # react hard early rather than waiting for danger -> 1.0
             exec_roll = float(np.clip(
                 exec_roll + config.AVOID_STEER_SIGN * config.AVOID_STEER_GAIN * severity * steer_lr,
                 -1.0, 1.0,
             ))
             exec_pitch = float(exec_pitch * (1.0 - config.AVOID_BRAKE_GAIN * severity))
+
+        if danger > config.AVOID_DANGER_HARD:
+            # something fills the center of the frame right now -- stop
+            # closing distance on it almost entirely regardless of the
+            # smooth curve above, and let the roll correction do the dodging.
+            exec_pitch = float(exec_pitch * 0.05)
 
         roll_rad = math.radians(exec_roll * config.MAX_ROLL_DEG)
         pitch_rad = math.radians(exec_pitch * config.MAX_PITCH_DEG)

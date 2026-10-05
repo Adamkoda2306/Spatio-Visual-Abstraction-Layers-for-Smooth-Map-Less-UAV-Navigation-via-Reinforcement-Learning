@@ -49,13 +49,23 @@ def avoidance_steer(grid: np.ndarray):
     Returns:
         steer_lr: in [-1, 1]. Positive = steer right (obstacle mass is
                   weighted toward the left), negative = steer left.
-        danger:   in [0, 1]. Occupancy directly ahead (center 3 columns,
-                  all rows), used to scale how hard to steer/brake.
+        danger:   in [0, 1]. How urgently something is blocking the path
+                  directly ahead.
+
+    `danger` is biased toward the eye-level center block (rows 1-3, the
+    vertical middle of the frame, cols 1-3) and blends mean with max so a
+    compact obstacle (a pole, a tree trunk) that doesn't fill the whole
+    vertical field of view isn't diluted away by clear sky above / ground
+    below it in the same columns -- a plain full-grid mean badly
+    underestimates exactly that case, which is what let the drone get close
+    enough to still collide even with the shield engaged.
     """
-    col_means = grid.mean(axis=0)  # shape (5,), left -> right
-    weight = float(col_means.sum()) + 1e-6
-    obstacle_bearing = float((col_means * _COL_POS).sum() / weight)  # -1 (left) .. +1 (right)
+    center = grid[1:4, 1:4]
+    danger = 0.5 * float(center.mean()) + 0.5 * float(center.max())
+
+    eye_level_cols = grid[1:4, :].mean(axis=0)  # shape (5,), left -> right, eye-level band only
+    weight = float(eye_level_cols.sum()) + 1e-6
+    obstacle_bearing = float((eye_level_cols * _COL_POS).sum() / weight)  # -1 (left) .. +1 (right)
     steer_lr = -obstacle_bearing
 
-    danger = float(grid[:, 1:4].mean())
     return steer_lr, danger
