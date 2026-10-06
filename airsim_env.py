@@ -67,6 +67,7 @@ class AirSimUAVEnv(gym.Env):
         self._last_grid = np.zeros((config.OCC_GRID, config.OCC_GRID), dtype=np.float32)
         self._danger_ema = 0.0
         self._steer_ema = 0.0
+        self._collision_baseline_ts = 0
         self.trajectory = []  # populated during episodes for plotting/analysis
 
     # ------------------------------------------------------------------
@@ -88,8 +89,28 @@ class AirSimUAVEnv(gym.Env):
         else:
             self._goal = self._sample_goal()
 
-        self._target_z = float(np.clip(self._goal[2], -config.ALT_MAX, -config.ALT_MIN))
+        # Climb to a safe cruise altitude rather than diving straight to the
+        # goal's own altitude here: if the goal is low (e.g. near-ground,
+        # like z=-0.5 clipped to -ALT_MIN=2m), a blind unguided descent to
+        # 2m right at spawn -- with no perception/shield involved, since
+        # that only runs inside step() -- can clip ground-level clutter
+        # (benches, cars, curbs, low walls) before the RL policy ever takes
+        # a single action. That was previously making most episodes die in
+        # 1 step regardless of what the policy did, which starves PPO of
+        # any real multi-step experience to learn from and looks exactly
+        # like "it never reaches the goal and never improves". The agent's
+        # own climb-rate action (already wired up in step()) is now
+        # responsible for descending to the goal's real altitude as part
+        # of actually reaching it, the same as any other axis of motion.
+        self._target_z = -config.H_MAX
         self.client.moveToZAsync(self._target_z, 2.0, vehicle_name=self.vehicle_name).join()
+
+        # AirSim's collision flag can still be set from whatever happened
+        # right up to this reset (or from the climb above, if it clips
+        # something); record its timestamp so step() only reacts to a
+        # genuinely NEW collision recorded during this episode, not stale
+        # leftover state from before the episode actually started.
+        self._collision_baseline_ts = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name).time_stamp
 
         self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)
         self._step_count = 0
@@ -184,7 +205,8 @@ class AirSimUAVEnv(gym.Env):
 
         body_velocity = self._get_body_velocity(yaw_deg)
 
-        collided = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name).has_collided
+        collision_info = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name)
+        collided = bool(collision_info.has_collided and collision_info.time_stamp != self._collision_baseline_ts)
         timed_out = self._step_count >= config.MAX_EPISODE_STEPS
 
         reward, info = compute_reward(
