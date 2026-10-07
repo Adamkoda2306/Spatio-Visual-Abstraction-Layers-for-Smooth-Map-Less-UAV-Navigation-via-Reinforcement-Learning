@@ -13,7 +13,7 @@ Usage:
     # random goal each episode (generalizing policy)
     env\\Scripts\\python.exe train_ppo.py --timesteps 1000000 --alpha 0.01
 
-    # train to reach one fixed (x, y, z) NED destination => goal 131.94, -275.53, -10.0
+    # train to reach one fixed (x, y, z) NED destination => goal 131.94, -275.53, -10.0 or 127.32, 25.28, -0.15 (AIRSIMNH)
     env\\Scripts\\python.exe train_ppo.py --timesteps 1000000 --alpha 0.01 --goal_x 131.94 --goal_y -275.53 --goal_z -10.0
 """
 

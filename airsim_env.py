@@ -30,6 +30,7 @@ import config
 from unet import ObstaclePerceptionModule
 from occupancy import pool_to_grid, flatten_grid, avoidance_steer
 from reward import compute_reward
+import live_view
 
 
 class AirSimUAVEnv(gym.Env):
@@ -119,6 +120,8 @@ class AirSimUAVEnv(gym.Env):
         self._last_grid = grid
         obs = self._build_state(grid, dx, dy, dz)
         self.trajectory.append(pos.copy())
+
+        self._show_live_view(grid, yaw_deg, dx, dy, 0.0, self._prev_dist)
 
         return obs.astype(np.float32), {}
 
@@ -229,6 +232,8 @@ class AirSimUAVEnv(gym.Env):
 
         info.update(dict(success=success, collided=collided, timed_out=timed_out, distance=d_curr))
 
+        self._show_live_view(grid, yaw_deg, dx, dy, exec_lateral, d_curr)
+
         return obs.astype(np.float32), float(reward), terminated, truncated, info
 
     def close(self):
@@ -237,6 +242,16 @@ class AirSimUAVEnv(gym.Env):
             self.client.enableApiControl(False, self.vehicle_name)
         except Exception:
             pass
+        live_view.close()
+
+    def _show_live_view(self, grid, yaw_deg, dx, dy, exec_lateral, distance):
+        """Update the live occupancy-map HUD (live_view.py): marks the grid
+        column the goal bearing projects onto ("GOAL") and the column the
+        currently executed command is steering toward ("GOING")."""
+        bearing_deg = (math.degrees(math.atan2(dy, dx)) - yaw_deg + 180.0) % 360.0 - 180.0
+        goal_col, goal_visible = live_view.goal_bearing_to_grid_col(bearing_deg)
+        action_col = (exec_lateral + 1.0) / 2.0 * (config.OCC_GRID - 1)
+        live_view.show(grid, goal_col, goal_visible, action_col, distance, self._step_count)
 
     # ------------------------------------------------------------------
     # Helpers

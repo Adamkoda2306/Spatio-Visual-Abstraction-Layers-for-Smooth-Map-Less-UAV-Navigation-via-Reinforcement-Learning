@@ -11,6 +11,15 @@ import os
 IMG_SIZE = 256                 # AirSim FPV camera resolution (256x256x3 RGB)
 OCC_GRID = 5                   # compressed occupancy matrix size (5x5)
 UNET_WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), "weights", "unet.pt")
+CAMERA_HFOV_DEG = 90.0          # front camera horizontal FOV (settings.json CaptureSettings.FOV_Degrees)
+
+# --------------------------------------------------------------------------
+# Live occupancy-map HUD (live_view.py) -- purely a visualization, never read
+# by the policy or reward. Shows the 5x5 probability grid with markers for
+# the goal bearing and the currently executed steering direction.
+# --------------------------------------------------------------------------
+LIVE_VIEW = True
+LIVE_VIEW_CELL_PX = 70          # each grid cell is rendered this many pixels square
 
 # --------------------------------------------------------------------------
 # State / action space
