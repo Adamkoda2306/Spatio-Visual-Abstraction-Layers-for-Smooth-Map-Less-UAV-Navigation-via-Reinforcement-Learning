@@ -67,6 +67,15 @@ OBS_GLOBAL_COEFF = 1.0
 PROGRESS_LINEAR_COEFF = 20.0
 PROGRESS_INVERSE_COEFF = 100.0
 
+# Free-space-weighted motion reward: forward progress is scaled by
+# (1 - frontal occupancy), i.e. the same frozen U-Net probability map is
+# additionally read as "how rewarding is moving in this direction" --
+# moving through cells the map scores as open earns close to the full
+# motion reward, moving into cells it scores as obstructed earns almost
+# none. The U-Net itself is untouched (still a supervised, fixed-during-RL
+# obstacle detector, see unet.py); only the reward shaping is extended.
+FREE_MOTION_COEFF = 0.4
+
 # Free-space-seeking shaping: while something blocks the frontal column,
 # reward lateral velocity that agrees with the occupancy-grid's estimated
 # free-space bearing (see occupancy.avoidance_steer), so the policy is

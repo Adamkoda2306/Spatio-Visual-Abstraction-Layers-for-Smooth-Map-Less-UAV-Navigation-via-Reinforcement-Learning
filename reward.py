@@ -62,6 +62,21 @@ def compute_reward(
     o_front, o_global = frontal_and_global_occupancy(occupancy_grid)
     r_obs = -config.OBS_FRONT_COEFF * o_front - config.OBS_GLOBAL_COEFF * o_global
 
+    # --- Free-space-weighted motion reward (minor addon beyond Eq. 21) ---
+    # The U-Net probability map stays an obstacle detector trained purely by
+    # supervised mask labels (unet.py / train_unet.py) -- it is NOT jointly
+    # trained with the policy. This term simply reads that same frozen map a
+    # second way: (1 - o_front) is the model's estimate of how *free* the
+    # region the UAV is currently flying into is, so forward progress is
+    # scaled by it -- moving fast through a region the map scores as open
+    # earns close to the full motion reward, moving fast into a region it
+    # scores as obstructed earns almost none (on top of the r_obs penalty
+    # above). This gives the policy a direct, continuous "free space ahead
+    # -> moving there is more rewarding" signal, instead of only a one-off
+    # bonus when already past the obstacle threshold.
+    forward_progress = max(0.0, v_forward) / config.V_MAX
+    r_space = config.FREE_MOTION_COEFF * (1.0 - o_front) * min(forward_progress, 1.0)
+
     # --- Free-space-seeking shaping ---
     # While the frontal column is obstructed, reward lateral velocity that
     # agrees with the occupancy grid's own free-space bearing estimate (the
@@ -92,13 +107,14 @@ def compute_reward(
     elif timed_out:
         r_terminal = config.R_TIMEOUT
 
-    total = r_progress + r_yaw + r_motion + r_obs + r_freespace + r_jerk + r_time + r_terminal
+    total = r_progress + r_yaw + r_motion + r_obs + r_space + r_freespace + r_jerk + r_time + r_terminal
 
     info = dict(
         r_progress=r_progress,
         r_yaw=r_yaw,
         r_motion=r_motion,
         r_obs=r_obs,
+        r_space=r_space,
         r_freespace=r_freespace,
         r_jerk=r_jerk,
         r_time=r_time,
