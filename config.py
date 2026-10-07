@@ -49,21 +49,22 @@ ALPHA_SMOOTH = 0.01   # first-order low-pass EMA responsiveness coefficient
 # Reward shaping constants (Section 4)
 # --------------------------------------------------------------------------
 R_TIME = -0.02
-R_SUCCESS = 2000.0
-R_COLLISION = -100.0
-R_TIMEOUT = -100.0
+R_SUCCESS = 500.0
+R_COLLISION = -250.0
+R_TIMEOUT = -250.0
 SUCCESS_RADIUS = 1.0          # meters
 MAX_EPISODE_STEPS = 1000
 OBS_FRONT_THRESHOLD = 0.3
 JERK_COEFF = 0.05
-YAW_ALIGN_COEFF = 0.2
-YAW_RATE_PENALTY_COEFF = 0.4
-MOTION_FORWARD_COEFF = 0.3
-MOTION_SMOOTH_COEFF = 0.4
-OBS_FRONT_COEFF = 4.0
+YAW_ALIGN_COEFF = 0.10
+LATERAL_ESCAPE_COEFF = 0.30
+YAW_RATE_PENALTY_COEFF = 0.05
+MOTION_FORWARD_COEFF = 0.03
+MOTION_SMOOTH_COEFF = 0.01
+OBS_FRONT_COEFF = 6.0
 OBS_GLOBAL_COEFF = 1.0
-PROGRESS_LINEAR_COEFF = 20.0
-PROGRESS_INVERSE_COEFF = 100.0
+PROGRESS_LINEAR_COEFF = 30.0
+PROGRESS_INVERSE_COEFF = 20.0
 
 # --------------------------------------------------------------------------
 # Perception-driven safety shield (airsim_env.py only -- does NOT touch the

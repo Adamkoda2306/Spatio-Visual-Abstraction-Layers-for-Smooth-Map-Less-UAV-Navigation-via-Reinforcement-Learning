@@ -64,6 +64,11 @@ def compute_reward(
     if o_front > config.OBS_FRONT_THRESHOLD:
         # roll is the control axis that produces sideways escape motion under
         # coordinated attitude control, so it plays the role of |v_lateral| here.
+        v_lateral = abs(float(body_velocity[1]))
+        r_obs += (
+            config.LATERAL_ESCAPE_COEFF *
+            min(v_lateral, 1.0)
+        )
         r_obs += abs(roll_norm)
 
     # --- Jerk regularization (Eq. 23-24), penalizing abrupt attitude/throttle commands ---
