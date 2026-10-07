@@ -1,18 +1,18 @@
 """
-Continuous multi-modal reward formulation (Section 4, Eq. 16-28), adapted for
-low-level attitude control [roll, pitch, yaw_rate, climb_rate] instead of the
-paper's idealized body-frame velocity command. Where the original reward used
-the *commanded* forward/lateral velocity, this version uses the vehicle's
-*actual measured* body-frame velocity (read back from AirSim kinematics after
-the attitude command is executed), which better reflects real quadrotor
-dynamics (banking turns bleed off speed, throttle lag, etc.).
+Continuous multi-modal reward formulation (Section 4, Eq. 16-28) over the
+paper's body-frame velocity action [v_forward, v_lateral, yaw_rate]. Where
+the paper's reward used the *commanded* forward/lateral velocity, this
+version uses the vehicle's *actual measured* body-frame velocity (read back
+from AirSim kinematics after the velocity command is executed), which better
+reflects real quadrotor dynamics (inertia, drag) than the idealized
+instantaneous command.
 """
 
 import math
 import numpy as np
 
 import config
-from occupancy import frontal_and_global_occupancy
+from occupancy import frontal_and_global_occupancy, avoidance_steer
 
 
 def yaw_alignment_error_deg(current_yaw_deg: float, dx: float, dy: float) -> float:
@@ -33,10 +33,10 @@ def compute_reward(
     dx: float,
     dy: float,
     yaw_rate_norm: float,        # commanded yaw-rate action, in [-1,1]
-    roll_norm: float,             # commanded roll action, in [-1,1]
+    lateral_norm: float,          # commanded lateral-velocity action, in [-1,1]
     body_velocity: np.ndarray,    # measured [v_forward, v_lateral, v_z] (m/s), body frame
-    cmd_smooth: np.ndarray,       # smoothed [roll,pitch,yaw_rate,climb] command
-    cmd_target: np.ndarray,       # raw (pre-smoothing) [roll,pitch,yaw_rate,climb] command
+    cmd_smooth: np.ndarray,       # smoothed [v_forward,v_lateral,yaw_rate] command, in [-1,1]
+    cmd_target: np.ndarray,       # raw (pre-smoothing) [v_forward,v_lateral,yaw_rate] command
     occupancy_grid: np.ndarray,   # 5x5 matrix G
     collided: bool,
     timed_out: bool,
@@ -61,15 +61,21 @@ def compute_reward(
     # --- Obstacle-aware penalty (Eq. 22, 25-27) ---
     o_front, o_global = frontal_and_global_occupancy(occupancy_grid)
     r_obs = -config.OBS_FRONT_COEFF * o_front - config.OBS_GLOBAL_COEFF * o_global
+
+    # --- Free-space-seeking shaping ---
+    # While the frontal column is obstructed, reward lateral velocity that
+    # agrees with the occupancy grid's own free-space bearing estimate (the
+    # same signal the safety shield uses), so the policy is explicitly
+    # taught to steer into the open part of the U-Net probability map rather
+    # than only discovering that indirectly via collision penalties.
+    r_freespace = 0.0
     if o_front > config.OBS_FRONT_THRESHOLD:
-        # roll is the control axis that produces sideways escape motion under
-        # coordinated attitude control, so it plays the role of |v_lateral| here.
-        v_lateral = abs(float(body_velocity[1]))
-        r_obs += (
-            config.LATERAL_ESCAPE_COEFF *
-            min(v_lateral, 1.0)
-        )
-        r_obs += abs(roll_norm)
+        v_lateral = float(body_velocity[1])
+        r_obs += config.LATERAL_ESCAPE_COEFF * min(abs(v_lateral), 1.0)
+
+        steer_lr, _danger = avoidance_steer(occupancy_grid)  # >0 => free space is to the right
+        v_lateral_norm = float(np.clip(v_lateral / config.V_MAX, -1.0, 1.0))
+        r_freespace = config.FREESPACE_COEFF * steer_lr * v_lateral_norm
 
     # --- Jerk regularization (Eq. 23-24), penalizing abrupt attitude/throttle commands ---
     r_jerk = -config.JERK_COEFF * float(np.linalg.norm(cmd_target - cmd_smooth))
@@ -86,13 +92,14 @@ def compute_reward(
     elif timed_out:
         r_terminal = config.R_TIMEOUT
 
-    total = r_progress + r_yaw + r_motion + r_obs + r_jerk + r_time + r_terminal
+    total = r_progress + r_yaw + r_motion + r_obs + r_freespace + r_jerk + r_time + r_terminal
 
     info = dict(
         r_progress=r_progress,
         r_yaw=r_yaw,
         r_motion=r_motion,
         r_obs=r_obs,
+        r_freespace=r_freespace,
         r_jerk=r_jerk,
         r_time=r_time,
         r_terminal=r_terminal,

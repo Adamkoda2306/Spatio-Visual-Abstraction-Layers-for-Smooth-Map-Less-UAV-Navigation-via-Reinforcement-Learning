@@ -3,15 +3,14 @@ Gymnasium environment wrapping AirSim (AirSimNH, Multirotor mode) that implement
 the spatio-visual navigation pipeline from Section 3 of the paper:
 
   camera -> U-Net -> 5x5 occupancy compression -> 28-dim state
-  -> continuous attitude action -> exponential command smoothing -> AirSim execution
+  -> continuous velocity action -> exponential command smoothing -> AirSim execution
   -> multi-modal reward (Section 4)
 
-Control: the action is [roll, pitch, yaw_rate, climb_rate] in [-1, 1], executed
-through AirSim's low-level `moveByRollPitchYawrateZAsync`. This is a real
-flight-controller-style interface (bank/pitch angle + yaw rate + altitude
-set-point) rather than an idealized instantaneous body-frame velocity command,
-so the resulting flight looks and feels like a real drone (coordinated turns,
-smooth throttle response) instead of a kinematic slide.
+Control: the action is [v_forward, v_lateral, yaw_rate] in [-1, 1] (Eq. 9),
+executed through AirSim's `moveByVelocityBodyFrameAsync` (Section 3.4).
+Altitude is held automatically by the Eq. 13 cruise-altitude controller
+(vz = -(z + H_MAX)), so the policy only has to learn the 3 navigation axes
+the paper actually optimizes over.
 
 Goal: pass an explicit (x, y, z) NED destination via the constructor, via
 `reset(options={"goal": (x, y, z)})`, or via config.FIXED_GOAL. If none is
@@ -60,8 +59,8 @@ class AirSimUAVEnv(gym.Env):
         )
 
         self._goal = np.zeros(3, dtype=np.float32)
-        self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)  # [roll,pitch,yaw_rate,climb]
-        self._target_z = -config.H_MAX
+        self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)  # [v_forward,v_lateral,yaw_rate]
+        self._last_pos = np.array(config.START_POSITION, dtype=np.float32)
         self._prev_dist = None
         self._step_count = 0
         self._last_grid = np.zeros((config.OCC_GRID, config.OCC_GRID), dtype=np.float32)
@@ -89,21 +88,14 @@ class AirSimUAVEnv(gym.Env):
         else:
             self._goal = self._sample_goal()
 
-        # Climb to a safe cruise altitude rather than diving straight to the
-        # goal's own altitude here: if the goal is low (e.g. near-ground,
-        # like z=-0.5 clipped to -ALT_MIN=2m), a blind unguided descent to
-        # 2m right at spawn -- with no perception/shield involved, since
-        # that only runs inside step() -- can clip ground-level clutter
-        # (benches, cars, curbs, low walls) before the RL policy ever takes
-        # a single action. That was previously making most episodes die in
-        # 1 step regardless of what the policy did, which starves PPO of
-        # any real multi-step experience to learn from and looks exactly
-        # like "it never reaches the goal and never improves". The agent's
-        # own climb-rate action (already wired up in step()) is now
-        # responsible for descending to the goal's real altitude as part
-        # of actually reaching it, the same as any other axis of motion.
-        self._target_z = -config.H_MAX
-        self.client.moveToZAsync(self._target_z, 2.0, vehicle_name=self.vehicle_name).join()
+        # Climb to the cruise altitude H_MAX: per Eq. 13, altitude is held
+        # automatically at -H_MAX for the whole episode (vz = -(z + H_MAX)
+        # is recomputed every step in step()), not commanded by the policy.
+        # Success/distance (Eq. 17-18) only depend on horizontal [dx, dy],
+        # so the agent only has to learn the 3 navigation axes the paper
+        # actually optimizes over -- it never has to fly near ground-level
+        # clutter (benches, cars, curbs) to "reach" a low-altitude goal.
+        self.client.moveToZAsync(-config.H_MAX, 2.0, vehicle_name=self.vehicle_name).join()
 
         # AirSim's collision flag can still be set from whatever happened
         # right up to this reset (or from the climb above, if it clips
@@ -119,6 +111,7 @@ class AirSimUAVEnv(gym.Env):
         self.trajectory = []
 
         pos, yaw_deg = self._get_pose()
+        self._last_pos = pos.copy()
         dx, dy, dz = self._relative_target(pos)
         self._prev_dist = math.sqrt(dx ** 2 + dy ** 2)
 
@@ -131,21 +124,22 @@ class AirSimUAVEnv(gym.Env):
 
     def step(self, action):
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
-        a_roll, a_pitch, a_yaw_rate, a_climb = action
+        a_forward, a_lateral, a_yaw_rate = action
 
-        # Eq. 23 generalized: first-order exponential smoothing of the raw
-        # attitude/throttle command, so stick inputs don't change abruptly.
+        # Eq. 23: first-order exponential smoothing of the raw velocity
+        # command, so stick inputs don't change abruptly.
         cmd_target = action
         self._cmd_smooth = (1 - config.ALPHA_SMOOTH) * self._cmd_smooth + config.ALPHA_SMOOTH * cmd_target
 
-        # Perception-driven safety shield: softens the *executed* roll/pitch
-        # using the U-Net occupancy grid from what the drone currently sees
-        # (self._last_grid, set at the end of the previous step/reset), so an
-        # action that would fly straight into an obstacle gets steered around
-        # it instead of relying purely on the reward gradient to learn that
+        # Perception-driven safety shield: softens the *executed*
+        # forward/lateral velocity using the U-Net occupancy grid from what
+        # the drone currently sees (self._last_grid, set at the end of the
+        # previous step/reset), so an action that would fly straight into an
+        # obstacle gets steered toward the free space in the probability map
+        # instead of relying purely on the reward gradient to learn that
         # over millions of steps. The reward below still scores the agent's
-        # own raw action (a_roll, a_yaw_rate) exactly as before -- this only
-        # changes what actually gets flown.
+        # own raw action (a_yaw_rate, a_lateral) exactly as before -- this
+        # only changes what actually gets flown.
         #
         # danger/steer are EMA-smoothed across steps before being used: a raw
         # per-frame U-Net reading is noisy (lighting flicker, a leaf moving,
@@ -159,43 +153,44 @@ class AirSimUAVEnv(gym.Env):
         self._steer_ema += config.AVOID_EMA_ALPHA * (raw_steer - self._steer_ema)
         danger, steer_lr = self._danger_ema, self._steer_ema
 
-        exec_roll, exec_pitch = float(self._cmd_smooth[0]), float(self._cmd_smooth[1])
+        exec_forward, exec_lateral = float(self._cmd_smooth[0]), float(self._cmd_smooth[1])
         if danger > config.AVOID_DANGER_THRESHOLD:
             severity = min(1.0, (danger - config.AVOID_DANGER_THRESHOLD) / (1.0 - config.AVOID_DANGER_THRESHOLD))
             severity = severity ** 0.5  # react hard early rather than waiting for danger -> 1.0
-            exec_roll = float(np.clip(
-                exec_roll + config.AVOID_STEER_SIGN * config.AVOID_STEER_GAIN * severity * steer_lr,
+            exec_lateral = float(np.clip(
+                exec_lateral + config.AVOID_STEER_SIGN * config.AVOID_STEER_GAIN * severity * steer_lr,
                 -1.0, 1.0,
             ))
-            exec_pitch = float(exec_pitch * (1.0 - config.AVOID_BRAKE_GAIN * severity))
+            exec_forward = float(exec_forward * (1.0 - config.AVOID_BRAKE_GAIN * severity))
 
         if danger > config.AVOID_DANGER_HARD:
             # something fills the center of the frame right now -- stop
             # closing distance on it almost entirely regardless of the
-            # smooth curve above, and let the roll correction do the dodging.
-            exec_pitch = float(exec_pitch * 0.05)
+            # smooth curve above, and let the lateral correction do the dodging.
+            exec_forward = float(exec_forward * 0.05)
 
-        roll_rad = math.radians(exec_roll * config.MAX_ROLL_DEG)
-        pitch_rad = math.radians(exec_pitch * config.MAX_PITCH_DEG)
-        yaw_rate_rad = math.radians(float(self._cmd_smooth[2]) * config.OMEGA_MAX)
+        v_forward = exec_forward * config.V_MAX
+        v_lateral = exec_lateral * config.V_MAX
+        yaw_rate_deg = float(self._cmd_smooth[2]) * config.OMEGA_MAX
 
-        # climb axis nudges a target-altitude set-point rather than jumping to
-        # it directly, so vertical motion stays smooth like a real throttle stick
-        climb_delta = float(self._cmd_smooth[3]) * config.MAX_CLIMB_RATE * config.ACTION_DURATION
-        self._target_z = float(np.clip(self._target_z - climb_delta, -config.ALT_MAX, -config.ALT_MIN))
+        # Eq. 13: hold the cruise altitude H_MAX using the z recorded at the
+        # end of the previous step (avoids an extra AirSim round-trip here).
+        vz = float(np.clip(-(self._last_pos[2] + config.H_MAX), -config.V_MAX, config.V_MAX))
 
-        self.client.moveByRollPitchYawrateZAsync(
-            roll_rad,
-            pitch_rad,
-            yaw_rate_rad,
-            self._target_z,
+        self.client.moveByVelocityBodyFrameAsync(
+            v_forward,
+            v_lateral,
+            vz,
             config.ACTION_DURATION,
+            drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
+            yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate_deg),
             vehicle_name=self.vehicle_name,
         ).join()
 
         self._step_count += 1
 
         pos, yaw_deg = self._get_pose()
+        self._last_pos = pos.copy()
         dx, dy, dz = self._relative_target(pos)
         d_curr = math.sqrt(dx ** 2 + dy ** 2)
 
@@ -216,7 +211,7 @@ class AirSimUAVEnv(gym.Env):
             dx=dx,
             dy=dy,
             yaw_rate_norm=a_yaw_rate,
-            roll_norm=a_roll,
+            lateral_norm=a_lateral,
             body_velocity=body_velocity,
             cmd_smooth=self._cmd_smooth,
             cmd_target=cmd_target,

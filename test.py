@@ -12,7 +12,7 @@ Evaluation / analysis script reproducing the experiments in Section 5:
 
 Usage:
     env\\Scripts\\python.exe test.py --mode rollout --model models/ppo_uav_final_alpha0.01.zip --algo ppo --episodes 5
-    env\\Scripts\\python.exe test.py --mode rollout --model models/ppo_uav_final_alpha0.01.zip --algo ppo --goal_x 131.94 --goal_y -275.53 --goal_z 0.5
+    env\\Scripts\\python.exe test.py --mode rollout --model models/ppo_uav_final_alpha0.01.zip --algo ppo --goal_x 131.94 --goal_y -275.53 --goal_z -10.0
 """
 
 import argparse
@@ -23,13 +23,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
-from stable_baselines3 import PPO
-from sb3_contrib import TRPO
+from sb3_contrib import RecurrentPPO, TRPO
 
 import config
 from airsim_env import AirSimUAVEnv
 
-ALGOS = {"ppo": PPO, "trpo": TRPO}
+ALGOS = {"ppo": RecurrentPPO, "trpo": TRPO}
 
 
 def load_model(path, algo):
@@ -52,10 +51,20 @@ def run_episode(env, model, deterministic=True, goal=None, verbose=True):
     commands = []
     info = {}
 
+    # RecurrentPPO carries an LSTM hidden state across steps within an
+    # episode (its "memory" of previous actions/observations); reset it at
+    # episode_start and thread it through predict() each step. Non-recurrent
+    # algorithms (e.g. TRPO) simply ignore state/episode_start.
+    lstm_states = None
+    episode_start = np.array([True])
+
     while not done:
-        action, _ = model.predict(obs, deterministic=deterministic)
+        action, lstm_states = model.predict(
+            obs, state=lstm_states, episode_start=episode_start, deterministic=deterministic
+        )
         obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
+        episode_start = np.array([done])
         total_reward += reward
         steps += 1
         commands.append(env._cmd_smooth.copy())

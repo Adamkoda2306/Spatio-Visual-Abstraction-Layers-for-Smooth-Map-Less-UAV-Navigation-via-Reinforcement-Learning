@@ -1,19 +1,26 @@
 """
-Train a PPO policy (stable-baselines3) over the compact 28-dim spatio-visual
-state space produced by airsim_env.AirSimUAVEnv (Section 3.4, Eq. 14).
+Train a PPO policy (sb3-contrib RecurrentPPO, i.e. PPO + an LSTM) over the
+compact 28-dim spatio-visual state space produced by airsim_env.AirSimUAVEnv
+(Section 3.4, Eq. 14).
+
+The LSTM gives the policy "memory": its hidden state carries information
+about the sequence of states/actions/outcomes seen earlier in the current
+episode (e.g. "I already tried forward here and clipped an obstacle"),
+instead of the plain MLP policy picking each action from the current 28-dim
+state alone.
 
 Usage:
     # random goal each episode (generalizing policy)
     env\\Scripts\\python.exe train_ppo.py --timesteps 1000000 --alpha 0.01
 
-    # train to reach one fixed (x, y, z) NED destination => goal 131.94, -275.53, 0.5
-    env\\Scripts\\python.exe train_ppo.py --timesteps 1000000 --alpha 0.01 --goal_x 131.94 --goal_y -275.53 --goal_z 0.5
+    # train to reach one fixed (x, y, z) NED destination => goal 131.94, -275.53, -10.0
+    env\\Scripts\\python.exe train_ppo.py --timesteps 1000000 --alpha 0.01 --goal_x 131.94 --goal_y -275.53 --goal_z -10.0
 """
 
 import argparse
 import os
 
-from stable_baselines3 import PPO
+from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 
@@ -25,6 +32,14 @@ from callbacks import EpisodeLogCallback
 def make_env(goal=None):
     env = AirSimUAVEnv(goal=goal)
     return Monitor(env)
+
+
+def linear_schedule(initial_value: float, final_value: float = 0.0):
+    """Linearly anneal a hyperparameter (e.g. learning rate) over training,
+    as a function of the fraction of training remaining (1.0 -> 0.0)."""
+    def schedule(progress_remaining: float) -> float:
+        return final_value + progress_remaining * (initial_value - final_value)
+    return schedule
 
 
 def main():
@@ -53,22 +68,30 @@ def main():
     env = make_env(goal=goal)
 
     if args.resume:
-        model = PPO.load(args.resume, env=env, tensorboard_log=config.LOG_DIR)
+        model = RecurrentPPO.load(args.resume, env=env, tensorboard_log=config.LOG_DIR)
     else:
-        model = PPO(
-            "MlpPolicy",
+        model = RecurrentPPO(
+            "MlpLstmPolicy",
             env,
-            learning_rate=3e-4,
-            n_steps=2048,
+            learning_rate=linear_schedule(3e-4, 1e-5),   # anneal LR instead of a fixed 3e-4 for the whole run
+            n_steps=256,              # shorter rollout buffer suits BPTT through the LSTM
             batch_size=64,
             n_epochs=10,
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,          # Eq. 14, epsilon = 0.2
-            ent_coef=0.0,
+            ent_coef=0.01,           # keep some exploration going instead of collapsing to a greedy policy early
             vf_coef=0.5,
             max_grad_norm=0.5,
-            policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256, 256])),
+            policy_kwargs=dict(
+                net_arch=dict(pi=[128, 128], vf=[128, 128]),
+                lstm_hidden_size=128,
+                n_lstm_layers=1,
+                # std starts smaller than SB3's default (1.0) so early rollouts explore with
+                # gentle velocity commands instead of constantly saturating at +/-1 (bang-bang
+                # flight), which was previously the main cause of early-training collisions.
+                log_std_init=-1.0,
+            ),
             tensorboard_log=config.LOG_DIR,
             verbose=1,
         )

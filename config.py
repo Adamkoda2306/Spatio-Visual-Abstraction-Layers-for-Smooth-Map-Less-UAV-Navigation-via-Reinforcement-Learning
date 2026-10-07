@@ -17,26 +17,18 @@ UNET_WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), "weights", "unet.pt"
 # --------------------------------------------------------------------------
 STATE_DIM = OCC_GRID * OCC_GRID + 3   # 25 (flattened grid) + dx, dy, dz = 28
 
-# Action space extended beyond the paper's [v_forward, v_lateral, yaw_rate]
-# body-frame velocity command to full low-level attitude control
-# [roll, pitch, yaw_rate, climb_rate] in [-1, 1], driven through AirSim's
-# moveByRollPitchYawrateZAsync — this produces coordinated banking turns and
-# smooth throttle changes like a real flight controller, instead of an
-# idealized instantaneous velocity vector.
-ACTION_DIM = 4
+# Action space (Eq. 9): continuous body-frame [v_forward, v_lateral, yaw_rate]
+# in [-1, 1], driven through AirSim's moveByVelocityBodyFrameAsync (Section
+# 3.4). Altitude is held automatically via the Eq. 13 cruise-altitude
+# controller, not commanded by the policy.
+ACTION_DIM = 3
 
 # --------------------------------------------------------------------------
-# Physical UAV motion constraints
+# Physical UAV motion constraints (Eq. 10-13)
 # --------------------------------------------------------------------------
-V_MAX = 5.0            # m/s, reserved for reward normalization
+V_MAX = 5.0            # m/s, forward/lateral velocity scale
 OMEGA_MAX = 5.0         # deg/s, yaw rate scale
-H_MAX = 10.0            # m, default target altitude (AirSim NED: z = -H_MAX)
-
-MAX_ROLL_DEG = 15.0     # deg, max commanded bank angle
-MAX_PITCH_DEG = 15.0    # deg, max commanded pitch angle
-MAX_CLIMB_RATE = 2.0    # m/s, max commanded vertical speed (throttle axis)
-ALT_MIN = 2.0           # m, closest allowed altitude to the ground
-ALT_MAX = 60.0          # m, highest allowed altitude
+H_MAX = 10.0            # m, cruise altitude (AirSim NED: z = -H_MAX)
 
 # --------------------------------------------------------------------------
 # Velocity smoothing / jerk regularization
@@ -49,22 +41,29 @@ ALPHA_SMOOTH = 0.01   # first-order low-pass EMA responsiveness coefficient
 # Reward shaping constants (Section 4)
 # --------------------------------------------------------------------------
 R_TIME = -0.02
-R_SUCCESS = 500.0
-R_COLLISION = -250.0
-R_TIMEOUT = -250.0
+R_SUCCESS = 2000.0
+R_COLLISION = -1000.0
+R_TIMEOUT = -1000.0
 SUCCESS_RADIUS = 1.0          # meters
-MAX_EPISODE_STEPS = 1000
+MAX_EPISODE_STEPS = 500        # shorter episodes -> more terminal-reward samples per training budget
 OBS_FRONT_THRESHOLD = 0.3
 JERK_COEFF = 0.05
-YAW_ALIGN_COEFF = 0.10
-LATERAL_ESCAPE_COEFF = 0.30
-YAW_RATE_PENALTY_COEFF = 0.05
-MOTION_FORWARD_COEFF = 0.03
-MOTION_SMOOTH_COEFF = 0.01
-OBS_FRONT_COEFF = 6.0
+YAW_ALIGN_COEFF = 0.2
+LATERAL_ESCAPE_COEFF = 1.0
+YAW_RATE_PENALTY_COEFF = 0.4
+MOTION_FORWARD_COEFF = 0.3
+MOTION_SMOOTH_COEFF = 0.4
+OBS_FRONT_COEFF = 4.0
 OBS_GLOBAL_COEFF = 1.0
-PROGRESS_LINEAR_COEFF = 30.0
-PROGRESS_INVERSE_COEFF = 20.0
+PROGRESS_LINEAR_COEFF = 20.0
+PROGRESS_INVERSE_COEFF = 100.0
+
+# Free-space-seeking shaping: while something blocks the frontal column,
+# reward lateral velocity that agrees with the occupancy-grid's estimated
+# free-space bearing (see occupancy.avoidance_steer), so the policy is
+# explicitly taught "steer toward the open part of the probability map"
+# instead of relying only on collision penalties to discover that.
+FREESPACE_COEFF = 0.5
 
 # --------------------------------------------------------------------------
 # Perception-driven safety shield (airsim_env.py only -- does NOT touch the
@@ -75,12 +74,12 @@ PROGRESS_INVERSE_COEFF = 20.0
 # that behavior over millions of steps.
 # --------------------------------------------------------------------------
 AVOID_DANGER_THRESHOLD = 0.15   # eye-level occupancy (0-1) above which the shield starts engaging
-AVOID_DANGER_HARD = 0.55        # above this, pitch is cut almost to zero regardless of the curve below
-AVOID_STEER_GAIN = 2.0          # added lateral (roll) correction at full danger severity
-AVOID_BRAKE_GAIN = 0.9          # fraction of forward pitch cut at full danger severity
+AVOID_DANGER_HARD = 0.55        # above this, forward velocity is cut almost to zero regardless of the curve below
+AVOID_STEER_GAIN = 1.5          # added lateral-velocity correction (toward free space) at full danger severity
+AVOID_BRAKE_GAIN = 0.9          # fraction of forward velocity cut at full danger severity
 AVOID_STEER_SIGN = 1.0          # flip to -1.0 if the drone is observed steering toward obstacles instead of away
 AVOID_EMA_ALPHA = 0.35          # smooths the per-frame danger/steer signal before it drives the shield, so
-                                # single-frame U-Net noise doesn't jerk the roll/pitch output step to step
+                                # single-frame U-Net noise doesn't jerk the lateral/forward output step to step
                                 # (this is what was making the drone visibly shake in 3rd-person view)
 
 # --------------------------------------------------------------------------
@@ -89,17 +88,12 @@ AVOID_EMA_ALPHA = 0.35          # smooths the per-frame danger/steer signal befo
 AIRSIM_IP = "127.0.0.1"
 VEHICLE_NAME = ""              # default vehicle in AirSimNH settings.json
 CAMERA_NAME = "0"              # front FPV camera id
-# Seconds each attitude command is held before re-planning. AirSim's
-# moveByRollPitchYawrateZAsync holds the commanded attitude for exactly this
-# long, then (if nothing else blocking it) effectively settles; the Python
-# step loop also does an image capture + U-Net forward pass + collision
-# check in between commands, which takes real wall-clock time on top of
-# this duration. If that per-step overhead is a large fraction of
-# ACTION_DURATION, the drone visibly pulses between "banking" and
-# "leveling out" every step -- the shaking seen in 3rd-person view. 0.4s
-# gives that overhead more headroom relative to the hold time than the
-# original 0.2s; lower it only if your machine's per-step loop is fast
-# enough that flight still looks smooth.
+# Seconds each velocity command is held before re-planning. AirSim's
+# moveByVelocityBodyFrameAsync holds the commanded velocity for exactly this
+# long; the Python step loop also does an image capture + U-Net forward pass
+# + collision check in between commands, which takes real wall-clock time on
+# top of this duration. Lower it only if your machine's per-step loop is
+# fast enough that flight still looks smooth.
 ACTION_DURATION = 0.4
 
 # --------------------------------------------------------------------------
