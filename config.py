@@ -67,6 +67,20 @@ OBS_GLOBAL_COEFF = 1.0
 PROGRESS_LINEAR_COEFF = 20.0
 PROGRESS_INVERSE_COEFF = 100.0
 
+# Distance-to-target shaping, proximity milestones, and idle penalty --
+# re-added to match the earlier envF.py prototype's reward (on top of the
+# Eq. 17 progress term, which is kept unchanged).
+DISTANCE_PENALTY_COEFF = 0.05   # -0.05 * distance, every non-terminal step
+INVERSE_DISTANCE_COEFF = 1.0    # +1.0 / (distance + 1)
+MILESTONE_RADIUS_1 = 50.0       # meters
+MILESTONE_BONUS_1 = 50.0
+MILESTONE_RADIUS_2 = 20.0       # meters
+MILESTONE_BONUS_2 = 100.0
+MILESTONE_RADIUS_3 = 10.0       # meters
+MILESTONE_BONUS_3 = 300.0
+IDLE_PROGRESS_THRESHOLD = 0.01  # meters of progress per step below which it counts as "idle"
+IDLE_PENALTY = 0.5
+
 # Free-space-weighted motion reward: forward progress is scaled by
 # (1 - frontal occupancy), i.e. the same frozen U-Net probability map is
 # additionally read as "how rewarding is moving in this direction" --
@@ -112,7 +126,7 @@ CAMERA_NAME = "0"              # front FPV camera id
 # + collision check in between commands, which takes real wall-clock time on
 # top of this duration. Lower it only if your machine's per-step loop is
 # fast enough that flight still looks smooth.
-ACTION_DURATION = 0.4
+ACTION_DURATION = 0.3
 
 # --------------------------------------------------------------------------
 # Target / episode sampling (AirSimNH suburban block, NED frame, meters)
@@ -125,7 +139,7 @@ GOAL_SAMPLING_RADIUS_MAX = 110.0
 # Leave as None during training to keep sampling random goals for generalization;
 # set it (or pass --goal_x/--goal_y/--goal_z / reset(options={"goal": (x,y,z)}))
 # to fly to one specific destination.
-FIXED_GOAL = None
+FIXED_GOAL = [80, -97.22, -0.15]
 
 # --------------------------------------------------------------------------
 # Training

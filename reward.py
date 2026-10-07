@@ -50,6 +50,28 @@ def compute_reward(
     # --- Progress and target proximity (Eq. 17) ---
     r_progress = (d_prev - d_curr) * (config.PROGRESS_LINEAR_COEFF + config.PROGRESS_INVERSE_COEFF / (d_curr + 1.0))
 
+    # --- Distance-to-target shaping (re-added from the earlier envF.py prototype) ---
+    # A small continuous penalty on raw distance plus an inverse-distance
+    # bonus, on top of the Eq. 17 progress term above.
+    r_distance = -config.DISTANCE_PENALTY_COEFF * d_curr + config.INVERSE_DISTANCE_COEFF / (d_curr + 1.0)
+
+    # --- Proximity milestone bonuses (re-added from the earlier envF.py prototype) ---
+    # Flat bonuses that stack as the UAV gets inside successive distance
+    # bands around the target (not mutually exclusive -- being within 10m
+    # also counts as being within 20m and 50m).
+    r_proximity = 0.0
+    if d_curr < config.MILESTONE_RADIUS_1:
+        r_proximity += config.MILESTONE_BONUS_1
+    if d_curr < config.MILESTONE_RADIUS_2:
+        r_proximity += config.MILESTONE_BONUS_2
+    if d_curr < config.MILESTONE_RADIUS_3:
+        r_proximity += config.MILESTONE_BONUS_3
+
+    # --- Idle penalty (re-added from the earlier envF.py prototype) ---
+    # Penalizes steps that make almost no progress toward or away from the
+    # target, discouraging hovering/stalling.
+    r_idle = -config.IDLE_PENALTY if abs(d_prev - d_curr) < config.IDLE_PROGRESS_THRESHOLD else 0.0
+
     # --- Target-facing alignment (Eq. 19-20) ---
     e_theta = yaw_alignment_error_deg(current_yaw_deg, dx, dy)
     r_yaw = config.YAW_ALIGN_COEFF * (1.0 - e_theta / 180.0) - config.YAW_RATE_PENALTY_COEFF * abs(yaw_rate_norm)
@@ -107,10 +129,16 @@ def compute_reward(
     elif timed_out:
         r_terminal = config.R_TIMEOUT
 
-    total = r_progress + r_yaw + r_motion + r_obs + r_space + r_freespace + r_jerk + r_time + r_terminal
+    total = (
+        r_progress + r_distance + r_proximity + r_idle
+        + r_yaw + r_motion + r_obs + r_space + r_freespace + r_jerk + r_time + r_terminal
+    )
 
     info = dict(
         r_progress=r_progress,
+        r_distance=r_distance,
+        r_proximity=r_proximity,
+        r_idle=r_idle,
         r_yaw=r_yaw,
         r_motion=r_motion,
         r_obs=r_obs,
