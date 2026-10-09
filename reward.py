@@ -40,6 +40,8 @@ def compute_reward(
     occupancy_grid: np.ndarray,   # 5x5 matrix G
     collided: bool,
     timed_out: bool,
+    milestones_hit: set,          # per-episode set of proximity-milestone keys already awarded; MUTATED in place
+    shield_severity: float = 0.0,  # 0..1, how hard the safety shield intervened this step (0 if it didn't)
 ):
     """
     Returns (total_reward, info_dict) following Rtotal = Rprogress + Ryaw + Rmotion
@@ -55,17 +57,25 @@ def compute_reward(
     # bonus, on top of the Eq. 17 progress term above.
     r_distance = -config.DISTANCE_PENALTY_COEFF * d_curr + config.INVERSE_DISTANCE_COEFF / (d_curr + 1.0)
 
-    # --- Proximity milestone bonuses (re-added from the earlier envF.py prototype) ---
-    # Flat bonuses that stack as the UAV gets inside successive distance
-    # bands around the target (not mutually exclusive -- being within 10m
-    # also counts as being within 20m and 50m).
+    # --- Proximity milestone bonuses, ONE-TIME per episode ---
+    # The original envF.py prototype paid these every single step the UAV
+    # stayed inside a distance band (e.g. +450/step within 10m), which made
+    # loitering near the goal without ever entering SUCCESS_RADIUS far more
+    # profitable than actually finishing -- e.g. hovering 9.5m away for 500
+    # steps earned ~24,000+ reward while the episode still timed out. Each
+    # milestone now pays out exactly once per episode (tracked via
+    # `milestones_hit`, reset by the caller at the start of every episode),
+    # so getting close still matters, but completing the approach to within
+    # SUCCESS_RADIUS (R_SUCCESS) is no longer dominated by a hover reward.
     r_proximity = 0.0
-    if d_curr < config.MILESTONE_RADIUS_1:
-        r_proximity += config.MILESTONE_BONUS_1
-    if d_curr < config.MILESTONE_RADIUS_2:
-        r_proximity += config.MILESTONE_BONUS_2
-    if d_curr < config.MILESTONE_RADIUS_3:
-        r_proximity += config.MILESTONE_BONUS_3
+    for _radius, _bonus, _key in (
+        (config.MILESTONE_RADIUS_1, config.MILESTONE_BONUS_1, "m1"),
+        (config.MILESTONE_RADIUS_2, config.MILESTONE_BONUS_2, "m2"),
+        (config.MILESTONE_RADIUS_3, config.MILESTONE_BONUS_3, "m3"),
+    ):
+        if d_curr < _radius and _key not in milestones_hit:
+            r_proximity += _bonus
+            milestones_hit.add(_key)
 
     # --- Idle penalty (re-added from the earlier envF.py prototype) ---
     # Penalizes steps that make almost no progress toward or away from the
@@ -84,6 +94,27 @@ def compute_reward(
     o_front, o_global = frontal_and_global_occupancy(occupancy_grid)
     r_obs = -config.OBS_FRONT_COEFF * o_front - config.OBS_GLOBAL_COEFF * o_global
 
+    # --- Graduated obstacle-proximity penalty ---
+    # Mirrors the goal proximity milestones structurally (escalating bands),
+    # but pushes the policy AWAY from danger instead of toward a target, and
+    # is charged every single step the frontal occupancy stays in a band --
+    # unlike the goal milestones, there is no "loiter to farm reward" risk
+    # here, since this is strictly a cost, so repeating it every step is
+    # exactly what's wanted: the longer the UAV stays pointed at something
+    # dangerous, the more it keeps bleeding reward for it. This stacks with
+    # the continuous linear r_obs term above, giving the policy a much
+    # sharper, more clearly-staged signal than a single linear coefficient
+    # ("this is mildly bad" -> "this is bad" -> "this is very bad") that is
+    # specifically meant to be easy to learn to avoid entirely.
+    r_obstacle_proximity = 0.0
+    for _o_radius, _o_penalty in (
+        (config.OBSTACLE_DANGER_RADIUS_1, config.OBSTACLE_DANGER_PENALTY_1),
+        (config.OBSTACLE_DANGER_RADIUS_2, config.OBSTACLE_DANGER_PENALTY_2),
+        (config.OBSTACLE_DANGER_RADIUS_3, config.OBSTACLE_DANGER_PENALTY_3),
+    ):
+        if o_front > _o_radius:
+            r_obstacle_proximity -= _o_penalty
+
     # --- Free-space-weighted motion reward (minor addon beyond Eq. 21) ---
     # The U-Net probability map stays an obstacle detector trained purely by
     # supervised mask labels (unet.py / train_unet.py) -- it is NOT jointly
@@ -99,6 +130,17 @@ def compute_reward(
     forward_progress = max(0.0, v_forward) / config.V_MAX
     r_space = config.FREE_MOTION_COEFF * (1.0 - o_front) * min(forward_progress, 1.0)
 
+    # --- Clear-path bonus ---
+    # Extra reward, on top of r_space, specifically for making forward
+    # progress while the frontal column is confidently clear (well under the
+    # first danger band above) -- the direct positive counterpart to the
+    # obstacle-proximity penalty: staying away from obstacles is rewarded,
+    # not just approaching them punished. Tied to forward_progress (exactly
+    # like r_space) so it cannot be farmed by hovering in open space.
+    r_clearance = 0.0
+    if o_front < config.CLEARANCE_SAFE_THRESHOLD:
+        r_clearance = config.CLEARANCE_BONUS_COEFF * min(forward_progress, 1.0)
+
     # --- Free-space-seeking shaping ---
     # While the frontal column is obstructed, reward lateral velocity that
     # agrees with the occupancy grid's own free-space bearing estimate (the
@@ -113,6 +155,20 @@ def compute_reward(
         steer_lr, _danger = avoidance_steer(occupancy_grid)  # >0 => free space is to the right
         v_lateral_norm = float(np.clip(v_lateral / config.V_MAX, -1.0, 1.0))
         r_freespace = config.FREESPACE_COEFF * steer_lr * v_lateral_norm
+
+    # --- Safety-shield intervention penalty ---
+    # airsim_env.py's hard-coded safety shield can override the policy's raw
+    # action near obstacles, which means a step that "should" have collided
+    # can come back with a perfectly fine r_obs (computed from the resulting
+    # occupancy/velocity *after* the shield already fixed it). That breaks
+    # the gradient the policy needs to learn genuine avoidance on its own --
+    # it can keep flying straight at things and rely on the shield to save
+    # it, since the reward rarely shows the near-miss. This term closes that
+    # gap directly: it charges the policy for how hard the shield had to
+    # intervene this step, independent of whether a collision actually
+    # happened, so "I needed rescuing" is always a cost even when the rescue
+    # worked.
+    r_shield = -config.SHIELD_PENALTY_COEFF * shield_severity
 
     # --- Jerk regularization (Eq. 23-24), penalizing abrupt attitude/throttle commands ---
     r_jerk = -config.JERK_COEFF * float(np.linalg.norm(cmd_target - cmd_smooth))
@@ -131,7 +187,8 @@ def compute_reward(
 
     total = (
         r_progress + r_distance + r_proximity + r_idle
-        + r_yaw + r_motion + r_obs + r_space + r_freespace + r_jerk + r_time + r_terminal
+        + r_yaw + r_motion + r_obs + r_obstacle_proximity + r_space + r_clearance
+        + r_freespace + r_shield + r_jerk + r_time + r_terminal
     )
 
     info = dict(
@@ -142,8 +199,11 @@ def compute_reward(
         r_yaw=r_yaw,
         r_motion=r_motion,
         r_obs=r_obs,
+        r_obstacle_proximity=r_obstacle_proximity,
         r_space=r_space,
+        r_clearance=r_clearance,
         r_freespace=r_freespace,
+        r_shield=r_shield,
         r_jerk=r_jerk,
         r_time=r_time,
         r_terminal=r_terminal,

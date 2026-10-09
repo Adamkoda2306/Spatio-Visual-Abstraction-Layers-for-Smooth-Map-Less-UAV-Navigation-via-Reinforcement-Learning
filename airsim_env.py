@@ -68,6 +68,7 @@ class AirSimUAVEnv(gym.Env):
         self._danger_ema = 0.0
         self._steer_ema = 0.0
         self._collision_baseline_ts = 0
+        self._milestones_hit = set()  # proximity-milestone keys already paid out this episode (reward.py)
         self.trajectory = []  # populated during episodes for plotting/analysis
 
     # ------------------------------------------------------------------
@@ -109,6 +110,7 @@ class AirSimUAVEnv(gym.Env):
         self._step_count = 0
         self._danger_ema = 0.0
         self._steer_ema = 0.0
+        self._milestones_hit = set()
         self.trajectory = []
 
         pos, yaw_deg = self._get_pose()
@@ -157,9 +159,11 @@ class AirSimUAVEnv(gym.Env):
         danger, steer_lr = self._danger_ema, self._steer_ema
 
         exec_forward, exec_lateral = float(self._cmd_smooth[0]), float(self._cmd_smooth[1])
+        shield_severity = 0.0
         if danger > config.AVOID_DANGER_THRESHOLD:
             severity = min(1.0, (danger - config.AVOID_DANGER_THRESHOLD) / (1.0 - config.AVOID_DANGER_THRESHOLD))
             severity = severity ** 0.5  # react hard early rather than waiting for danger -> 1.0
+            shield_severity = severity
             exec_lateral = float(np.clip(
                 exec_lateral + config.AVOID_STEER_SIGN * config.AVOID_STEER_GAIN * severity * steer_lr,
                 -1.0, 1.0,
@@ -221,6 +225,8 @@ class AirSimUAVEnv(gym.Env):
             occupancy_grid=grid,
             collided=collided,
             timed_out=timed_out,
+            milestones_hit=self._milestones_hit,
+            shield_severity=shield_severity,
         )
 
         self._prev_dist = d_curr

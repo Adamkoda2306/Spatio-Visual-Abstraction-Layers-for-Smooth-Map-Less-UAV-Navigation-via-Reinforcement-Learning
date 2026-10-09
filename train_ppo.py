@@ -60,7 +60,7 @@ def main():
         goal = (args.goal_x, args.goal_y, args.goal_z)
         print(f"Training toward fixed goal: {goal}")
     else:
-        print("No fixed goal given — sampling a random goal each episode.")
+        print("fixed goal given for each episode.")
 
     os.makedirs(config.LOG_DIR, exist_ok=True)
     os.makedirs(config.MODEL_DIR, exist_ok=True)
@@ -90,7 +90,8 @@ def main():
                 # std starts smaller than SB3's default (1.0) so early rollouts explore with
                 # gentle velocity commands instead of constantly saturating at +/-1 (bang-bang
                 # flight), which was previously the main cause of early-training collisions.
-                log_std_init=-1.0,
+                
+                # log_std_init=-1.0,
             ),
             tensorboard_log=config.LOG_DIR,
             verbose=1,

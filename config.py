@@ -70,7 +70,7 @@ PROGRESS_INVERSE_COEFF = 100.0
 # Distance-to-target shaping, proximity milestones, and idle penalty --
 # re-added to match the earlier envF.py prototype's reward (on top of the
 # Eq. 17 progress term, which is kept unchanged).
-DISTANCE_PENALTY_COEFF = 0.05   # -0.05 * distance, every non-terminal step
+DISTANCE_PENALTY_COEFF = 0.5   # -0.5 * distance, every non-terminal step
 INVERSE_DISTANCE_COEFF = 1.0    # +1.0 / (distance + 1)
 MILESTONE_RADIUS_1 = 50.0       # meters
 MILESTONE_BONUS_1 = 50.0
@@ -79,7 +79,28 @@ MILESTONE_BONUS_2 = 100.0
 MILESTONE_RADIUS_3 = 10.0       # meters
 MILESTONE_BONUS_3 = 300.0
 IDLE_PROGRESS_THRESHOLD = 0.01  # meters of progress per step below which it counts as "idle"
-IDLE_PENALTY = 0.5
+IDLE_PENALTY = 10
+
+# Graduated obstacle-proximity penalty: escalating bands on frontal
+# occupancy (o_front), structurally mirroring the goal proximity milestones
+# above but pushing away from danger instead of toward a target. Charged
+# EVERY step the condition holds (not one-time like the goal milestones --
+# there's no hovering-exploit risk with a pure penalty, so repeating it is
+# the point: the longer it stays pointed at something dangerous, the more
+# it costs). Bands stack, so o_front > 0.7 pays all three penalties.
+OBSTACLE_DANGER_RADIUS_1 = 0.3   # same threshold as OBS_FRONT_THRESHOLD/the lateral-escape trigger
+OBSTACLE_DANGER_PENALTY_1 = 50.0
+OBSTACLE_DANGER_RADIUS_2 = 0.5
+OBSTACLE_DANGER_PENALTY_2 = 100.0
+OBSTACLE_DANGER_RADIUS_3 = 0.7
+OBSTACLE_DANGER_PENALTY_3 = 150.0
+
+# Clear-path bonus: the positive counterpart to the penalty bands above --
+# extra reward (on top of r_space) for making forward progress while the
+# frontal occupancy is confidently clear. Tied to forward_progress so it
+# can't be farmed by hovering in open space.
+CLEARANCE_SAFE_THRESHOLD = 0.1
+CLEARANCE_BONUS_COEFF = 0.5
 
 # Free-space-weighted motion reward: forward progress is scaled by
 # (1 - frontal occupancy), i.e. the same frozen U-Net probability map is
@@ -113,6 +134,13 @@ AVOID_STEER_SIGN = 1.0          # flip to -1.0 if the drone is observed steering
 AVOID_EMA_ALPHA = 0.35          # smooths the per-frame danger/steer signal before it drives the shield, so
                                 # single-frame U-Net noise doesn't jerk the lateral/forward output step to step
                                 # (this is what was making the drone visibly shake in 3rd-person view)
+
+# Reward-side penalty (reward.py) for how hard the shield above had to
+# intervene this step (0 when it didn't engage). Closes the credit-
+# assignment gap between "the policy flew at an obstacle" and "the shield
+# quietly fixed it", so the policy has a direct incentive to not need
+# rescuing in the first place instead of leaning on the shield as a crutch.
+SHIELD_PENALTY_COEFF = 5.0
 
 # --------------------------------------------------------------------------
 # AirSim connection
