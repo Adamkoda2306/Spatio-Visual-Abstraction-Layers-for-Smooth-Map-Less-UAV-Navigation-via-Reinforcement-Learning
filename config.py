@@ -70,7 +70,7 @@ PROGRESS_INVERSE_COEFF = 100.0
 # Distance-to-target shaping, proximity milestones, and idle penalty --
 # re-added to match the earlier envF.py prototype's reward (on top of the
 # Eq. 17 progress term, which is kept unchanged).
-DISTANCE_PENALTY_COEFF = 0.5   # -0.5 * distance, every non-terminal step
+DISTANCE_PENALTY_COEFF = 0.05   # -0.05 * distance, every non-terminal step
 INVERSE_DISTANCE_COEFF = 1.0    # +1.0 / (distance + 1)
 MILESTONE_RADIUS_1 = 50.0       # meters
 MILESTONE_BONUS_1 = 50.0
