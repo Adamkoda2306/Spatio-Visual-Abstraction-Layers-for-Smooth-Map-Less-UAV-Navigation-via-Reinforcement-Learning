@@ -79,7 +79,7 @@ MILESTONE_BONUS_2 = 100.0
 MILESTONE_RADIUS_3 = 10.0       # meters
 MILESTONE_BONUS_3 = 300.0
 IDLE_PROGRESS_THRESHOLD = 0.01  # meters of progress per step below which it counts as "idle"
-IDLE_PENALTY = 10
+IDLE_PENALTY = 5
 
 # Graduated obstacle-proximity penalty: escalating bands on frontal
 # occupancy (o_front), structurally mirroring the goal proximity milestones
@@ -89,11 +89,11 @@ IDLE_PENALTY = 10
 # the point: the longer it stays pointed at something dangerous, the more
 # it costs). Bands stack, so o_front > 0.7 pays all three penalties.
 OBSTACLE_DANGER_RADIUS_1 = 0.3   # same threshold as OBS_FRONT_THRESHOLD/the lateral-escape trigger
-OBSTACLE_DANGER_PENALTY_1 = 50.0
+OBSTACLE_DANGER_PENALTY_1 = 10.0
 OBSTACLE_DANGER_RADIUS_2 = 0.5
-OBSTACLE_DANGER_PENALTY_2 = 100.0
+OBSTACLE_DANGER_PENALTY_2 = 25.0
 OBSTACLE_DANGER_RADIUS_3 = 0.7
-OBSTACLE_DANGER_PENALTY_3 = 150.0
+OBSTACLE_DANGER_PENALTY_3 = 60.0
 
 # Clear-path bonus: the positive counterpart to the penalty bands above --
 # extra reward (on top of r_space) for making forward progress while the
