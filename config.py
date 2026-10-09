@@ -167,7 +167,8 @@ GOAL_SAMPLING_RADIUS_MAX = 110.0
 # Leave as None during training to keep sampling random goals for generalization;
 # set it (or pass --goal_x/--goal_y/--goal_z / reset(options={"goal": (x,y,z)}))
 # to fly to one specific destination.
-FIXED_GOAL = [80, -97.22, -0.15]
+# FIXED_GOAL = [80, -97.22, -0.15] # AIRSIMNH
+FIXED_GOAL = [-32.57, -164.56, -0.26] # IIITS
 
 # --------------------------------------------------------------------------
 # Training
