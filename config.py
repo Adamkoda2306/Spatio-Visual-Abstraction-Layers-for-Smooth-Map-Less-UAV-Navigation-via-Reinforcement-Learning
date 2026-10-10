@@ -42,7 +42,7 @@ H_MAX = 10.0            # m, cruise altitude (AirSim NED: z = -H_MAX)
 # --------------------------------------------------------------------------
 # Velocity smoothing / jerk regularization
 # --------------------------------------------------------------------------
-ALPHA_SMOOTH = 0.01   # first-order low-pass EMA responsiveness coefficient
+ALPHA_SMOOTH = 0.05   # first-order low-pass EMA responsiveness coefficient
                         # (Table 2: alpha in {0.001, 0.005, 0.01, 0.05, 0.1};
                         # 0.005-0.01 gave the best reward / episode length trade-off)
 
@@ -53,8 +53,8 @@ R_TIME = -0.02
 R_SUCCESS = 2000.0
 R_COLLISION = -1000.0
 R_TIMEOUT = -1000.0
-SUCCESS_RADIUS = 1.0          # meters
-MAX_EPISODE_STEPS = 500        # shorter episodes -> more terminal-reward samples per training budget
+SUCCESS_RADIUS = 2.0          # meters
+MAX_EPISODE_STEPS = 600        # shorter episodes -> more terminal-reward samples per training budget
 OBS_FRONT_THRESHOLD = 0.3
 JERK_COEFF = 0.05
 YAW_ALIGN_COEFF = 0.2
