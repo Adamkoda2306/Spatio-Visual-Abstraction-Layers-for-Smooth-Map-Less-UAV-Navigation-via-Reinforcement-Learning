@@ -1,0 +1,3 @@
+episode_start,episode_end,success_rate,collision_rate,timeout_rate,mean_final_distance,mean_minimum_distance
+1,100,0.00,39.00,61.00,76.2756,64.7127
+101,200,0.00,61.00,39.00,99.7205,53.0441
