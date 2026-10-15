@@ -18,7 +18,7 @@ CAMERA_HFOV_DEG = 90.0          # front camera horizontal FOV (settings.json Cap
 # by the policy or reward. Shows the 5x5 probability grid with markers for
 # the goal bearing and the currently executed steering direction.
 # --------------------------------------------------------------------------
-LIVE_VIEW = True
+LIVE_VIEW = False
 LIVE_VIEW_CELL_PX = 70          # each grid cell is rendered this many pixels square
 
 # --------------------------------------------------------------------------
