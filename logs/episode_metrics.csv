@@ -1,0 +1,7 @@
+episode,reward,steps,final_distance,minimum_distance,success,collided,timed_out
+1,-9064.4386,600,205.2900,160.3523,False,False,True
+2,-6037.5342,600,125.6388,125.4997,False,False,True
+3,-5789.4948,600,121.8628,119.3946,False,False,True
+4,-2539.4376,600,20.8875,20.8875,False,False,True
+5,-3142.7129,600,76.2543,46.6213,False,False,True
+6,-4618.2948,600,62.2109,51.8164,False,False,True
