@@ -12,6 +12,12 @@ Altitude is held automatically by the Eq. 13 cruise-altitude controller
 (vz = -(z + H_MAX)), so the policy only has to learn the 3 navigation axes
 the paper actually optimizes over.
 
+Perception is dual-sensor: the camera/U-Net occupancy grid (Eq. 3-5) gives a
+wide-FOV, semantic read of where free space and obstacles roughly are; the
+LiDAR sensor (lidar.py) gives real metric range in meters for how close the
+nearest obstacle actually is. Both feed the state, the safety shield, and
+the reward function (reward.py).
+
 Goal: pass an explicit (x, y, z) NED destination via the constructor, via
 `reset(options={"goal": (x, y, z)})`, or via config.FIXED_GOAL. If none is
 given, a goal is sampled randomly (useful for training generalizable policies).
@@ -31,6 +37,7 @@ from unet import ObstaclePerceptionModule
 from occupancy import pool_to_grid, flatten_grid, avoidance_steer
 from reward import compute_reward
 import live_view
+import lidar as lidar_mod
 
 
 class AirSimUAVEnv(gym.Env):
@@ -67,6 +74,10 @@ class AirSimUAVEnv(gym.Env):
         self._last_grid = np.zeros((config.OCC_GRID, config.OCC_GRID), dtype=np.float32)
         self._danger_ema = 0.0
         self._steer_ema = 0.0
+        self._last_lidar_closeness = np.zeros(config.LIDAR_NUM_SECTORS, dtype=np.float32)
+        self._last_lidar_ranges = np.full(config.LIDAR_NUM_SECTORS, config.LIDAR_MAX_RANGE, dtype=np.float32)
+        self._danger_ema_l = 0.0
+        self._steer_ema_l = 0.0
         self._collision_baseline_ts = 0
         self._milestones_hit = set()  # proximity-milestone keys already paid out this episode (reward.py)
         self.trajectory = []  # populated during episodes for plotting/analysis
@@ -110,6 +121,8 @@ class AirSimUAVEnv(gym.Env):
         self._step_count = 0
         self._danger_ema = 0.0
         self._steer_ema = 0.0
+        self._danger_ema_l = 0.0
+        self._steer_ema_l = 0.0
         self._milestones_hit = set()
         self.trajectory = []
 
@@ -120,7 +133,11 @@ class AirSimUAVEnv(gym.Env):
 
         grid = self._get_occupancy_grid()
         self._last_grid = grid
-        obs = self._build_state(grid, dx, dy, dz)
+        lidar_closeness, lidar_ranges = self._get_lidar_data()
+        self._last_lidar_closeness = lidar_closeness
+        self._last_lidar_ranges = lidar_ranges
+        body_velocity = self._get_body_velocity(yaw_deg)
+        obs = self._build_state(grid, dx, dy, dz, lidar_closeness, yaw_deg, body_velocity, self._cmd_smooth)
         self.trajectory.append(pos.copy())
 
         self._show_live_view(grid, yaw_deg, dx, dy, 0.0, self._prev_dist)
@@ -156,7 +173,26 @@ class AirSimUAVEnv(gym.Env):
         raw_steer, raw_danger = avoidance_steer(self._last_grid)
         self._danger_ema += config.AVOID_EMA_ALPHA * (raw_danger - self._danger_ema)
         self._steer_ema += config.AVOID_EMA_ALPHA * (raw_steer - self._steer_ema)
-        danger, steer_lr = self._danger_ema, self._steer_ema
+
+        # Same EMA-smoothing treatment for the LiDAR signal (from
+        # self._last_lidar_closeness, set at the end of the previous
+        # step/reset -- same one-step lag as the camera grid above).
+        raw_steer_l, raw_danger_l = lidar_mod.steer_from_closeness(self._last_lidar_closeness)
+        self._danger_ema_l += config.AVOID_EMA_ALPHA * (raw_danger_l - self._danger_ema_l)
+        self._steer_ema_l += config.AVOID_EMA_ALPHA * (raw_steer_l - self._steer_ema_l)
+
+        # Combine both sensors: take the worse (higher) of the two danger
+        # readings -- if either sensor says "something is close", that's
+        # trusted, since a miss by one sensor (e.g. a thin pole the camera's
+        # segmentation doesn't flag, or a reflective/glass surface LiDAR
+        # misses) shouldn't let danger go unnoticed. Steering is a weighted
+        # blend favoring LiDAR (LIDAR_STEER_WEIGHT), since it's a direct
+        # metric reading rather than an inferred probability.
+        danger = max(self._danger_ema, self._danger_ema_l)
+        steer_lr = (
+            config.LIDAR_STEER_WEIGHT * self._steer_ema_l
+            + (1.0 - config.LIDAR_STEER_WEIGHT) * self._steer_ema
+        )
 
         exec_forward, exec_lateral = float(self._cmd_smooth[0]), float(self._cmd_smooth[1])
         shield_severity = 0.0
@@ -203,9 +239,18 @@ class AirSimUAVEnv(gym.Env):
 
         grid = self._get_occupancy_grid()
         self._last_grid = grid
-        obs = self._build_state(grid, dx, dy, dz)
+
+        # Fresh LiDAR reading for this step's state/reward (the lagged
+        # self._last_lidar_* used above for the shield gets overwritten with
+        # this fresh reading for next step, same pattern as self._last_grid).
+        lidar_closeness, lidar_ranges = self._get_lidar_data()
+        self._last_lidar_closeness = lidar_closeness
+        self._last_lidar_ranges = lidar_ranges
+        lidar_front_m, lidar_global_m = lidar_mod.frontal_and_global_range(lidar_ranges)
 
         body_velocity = self._get_body_velocity(yaw_deg)
+
+        obs = self._build_state(grid, dx, dy, dz, lidar_closeness, yaw_deg, body_velocity, self._cmd_smooth)
 
         collision_info = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name)
         collided = bool(collision_info.has_collided and collision_info.time_stamp != self._collision_baseline_ts)
@@ -227,6 +272,8 @@ class AirSimUAVEnv(gym.Env):
             timed_out=timed_out,
             milestones_hit=self._milestones_hit,
             shield_severity=shield_severity,
+            lidar_front_m=lidar_front_m,
+            lidar_global_m=lidar_global_m,
         )
 
         self._prev_dist = d_curr
@@ -311,6 +358,27 @@ class AirSimUAVEnv(gym.Env):
         grid = pool_to_grid(prob_map)             # Eq. 4
         return grid
 
-    def _build_state(self, grid, dx, dy, dz):
+    def _get_lidar_data(self):
+        """Reads the LiDAR sensor and returns (closeness, ranges_m):
+        closeness is an (LIDAR_NUM_SECTORS,) array in [0,1] (0=clear,
+        1=very close), for the state vector; ranges_m is the same data in
+        real meters, for the reward/safety-shield metric-distance logic."""
+        lidar_data = self.client.getLidarData(lidar_name=config.LIDAR_NAME, vehicle_name=self.vehicle_name)
+        points = lidar_mod.parse_point_cloud(lidar_data.point_cloud)
+        ranges_m = lidar_mod.sector_ranges(points)
+        closeness = lidar_mod.closeness_from_ranges(ranges_m)
+        return closeness, ranges_m
+
+    def _build_state(self, grid, dx, dy, dz, lidar_closeness, yaw_deg, body_velocity, cmd_smooth):
         v_visual = flatten_grid(grid)  # Eq. 5, 25-dim
-        return np.concatenate([v_visual, [dx, dy, dz]])  # Eq. 7, 28-dim
+        yaw_rad = math.radians(yaw_deg)
+        heading = np.array([math.sin(yaw_rad), math.cos(yaw_rad)], dtype=np.float32)
+        vel_norm = np.clip(np.asarray(body_velocity, dtype=np.float32) / config.V_MAX, -1.0, 1.0)
+        return np.concatenate([
+            v_visual,                                   # 25: camera/U-Net occupancy (Eq. 5)
+            [dx, dy, dz],                                # 3:  relative target displacement (Eq. 6)
+            lidar_closeness.astype(np.float32),          # 7:  LiDAR per-sector closeness
+            heading,                                     # 2:  sin(yaw), cos(yaw)
+            vel_norm,                                    # 3:  measured body velocity, normalized
+            np.asarray(cmd_smooth, dtype=np.float32),    # 3:  current smoothed command
+        ])

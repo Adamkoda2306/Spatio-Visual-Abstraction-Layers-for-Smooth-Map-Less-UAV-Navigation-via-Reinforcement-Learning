@@ -1,12 +1,12 @@
 """
 Train a PPO policy (sb3-contrib RecurrentPPO, i.e. PPO + an LSTM) over the
-compact 28-dim spatio-visual state space produced by airsim_env.AirSimUAVEnv
-(Section 3.4, Eq. 14).
+compact spatio-visual + LiDAR state space (config.STATE_DIM) produced by
+airsim_env.AirSimUAVEnv (Section 3.4, Eq. 14).
 
 The LSTM gives the policy "memory": its hidden state carries information
 about the sequence of states/actions/outcomes seen earlier in the current
 episode (e.g. "I already tried forward here and clipped an obstacle"),
-instead of the plain MLP policy picking each action from the current 28-dim
+instead of the plain MLP policy picking each action from the current
 state alone.
 
 Usage:

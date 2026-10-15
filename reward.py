@@ -42,6 +42,8 @@ def compute_reward(
     timed_out: bool,
     milestones_hit: set,          # per-episode set of proximity-milestone keys already awarded; MUTATED in place
     shield_severity: float = 0.0,  # 0..1, how hard the safety shield intervened this step (0 if it didn't)
+    lidar_front_m: float = config.LIDAR_MAX_RANGE,  # min LiDAR range (meters) in the frontal sectors this step
+    lidar_global_m: float = config.LIDAR_MAX_RANGE,  # min LiDAR range (meters) over all sectors this step
 ):
     """
     Returns (total_reward, info_dict) following Rtotal = Rprogress + Ryaw + Rmotion
@@ -115,6 +117,26 @@ def compute_reward(
         if o_front > _o_radius:
             r_obstacle_proximity -= _o_penalty
 
+    # --- Graduated LiDAR obstacle-distance penalty ---
+    # Metric-range counterpart to r_obstacle_proximity above: uses real
+    # ranged distance (meters) from the LiDAR sensor instead of a
+    # camera-derived occupancy probability. The camera/U-Net tells the
+    # policy roughly *where* obstacles and free space are across a wide
+    # semantic field of view; LiDAR tells it *exactly how far away* the
+    # nearest one actually is, which is a much more direct, reliable signal
+    # for deciding how urgently to slow down or steer. Bands trip when
+    # distance drops BELOW a radius (closer = worse), stack, and -- like
+    # the camera bands -- are charged every step with no loiter-exploit
+    # risk, since this is strictly a cost.
+    r_lidar_proximity = 0.0
+    for _l_radius, _l_penalty in (
+        (config.LIDAR_DANGER_DIST_1, config.LIDAR_DANGER_PENALTY_1),
+        (config.LIDAR_DANGER_DIST_2, config.LIDAR_DANGER_PENALTY_2),
+        (config.LIDAR_DANGER_DIST_3, config.LIDAR_DANGER_PENALTY_3),
+    ):
+        if lidar_front_m < _l_radius:
+            r_lidar_proximity -= _l_penalty
+
     # --- Free-space-weighted motion reward (minor addon beyond Eq. 21) ---
     # The U-Net probability map stays an obstacle detector trained purely by
     # supervised mask labels (unet.py / train_unet.py) -- it is NOT jointly
@@ -140,6 +162,15 @@ def compute_reward(
     r_clearance = 0.0
     if o_front < config.CLEARANCE_SAFE_THRESHOLD:
         r_clearance = config.CLEARANCE_BONUS_COEFF * min(forward_progress, 1.0)
+
+    # --- LiDAR clear-path bonus ---
+    # Metric-range counterpart to r_clearance: extra reward for forward
+    # progress while the nearest *ranged* obstacle ahead is confidently far
+    # away, confirmed by actual distance rather than an obstacle-probability
+    # threshold. Tied to forward_progress so it can't be farmed by hovering.
+    r_lidar_clearance = 0.0
+    if lidar_front_m > config.LIDAR_CLEARANCE_SAFE_DIST:
+        r_lidar_clearance = config.LIDAR_CLEARANCE_BONUS_COEFF * min(forward_progress, 1.0)
 
     # --- Free-space-seeking shaping ---
     # While the frontal column is obstructed, reward lateral velocity that
@@ -187,7 +218,8 @@ def compute_reward(
 
     total = (
         r_progress + r_distance + r_proximity + r_idle
-        + r_yaw + r_motion + r_obs + r_obstacle_proximity + r_space + r_clearance
+        + r_yaw + r_motion + r_obs + r_obstacle_proximity + r_lidar_proximity
+        + r_space + r_clearance + r_lidar_clearance
         + r_freespace + r_shield + r_jerk + r_time + r_terminal
     )
 
@@ -200,7 +232,9 @@ def compute_reward(
         r_motion=r_motion,
         r_obs=r_obs,
         r_obstacle_proximity=r_obstacle_proximity,
+        r_lidar_proximity=r_lidar_proximity,
         r_space=r_space,
+        r_lidar_clearance=r_lidar_clearance,
         r_clearance=r_clearance,
         r_freespace=r_freespace,
         r_shield=r_shield,

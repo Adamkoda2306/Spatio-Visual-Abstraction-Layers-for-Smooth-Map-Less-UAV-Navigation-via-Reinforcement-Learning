@@ -27,6 +27,23 @@
           "X": 0.5, "Y": 0, "Z": -0.1,
           "Pitch": 0, "Roll": 0, "Yaw": 0
         }
+      },
+      "Sensors": {
+        "LidarSensor1": {
+          "SensorType": 6,
+          "Enabled": true,
+          "NumberOfChannels": 16,
+          "RotationsPerSecond": 10,
+          "PointsPerSecond": 100000,
+          "X": 0.5, "Y": 0, "Z": -0.1,
+          "Roll": 0, "Pitch": 0, "Yaw": 0,
+          "VerticalFOVUpper": 10,
+          "VerticalFOVLower": -10,
+          "HorizontalFOVStart": -90,
+          "HorizontalFOVEnd": 90,
+          "DrawDebugPoints": false,
+          "DataFrame": "SensorLocalFrame"
+        }
       }
     }
   }

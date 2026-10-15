@@ -14,6 +14,21 @@ UNET_WEIGHTS_PATH = os.path.join(os.path.dirname(__file__), "weights", "unet.pt"
 CAMERA_HFOV_DEG = 90.0          # front camera horizontal FOV (settings.json CaptureSettings.FOV_Degrees)
 
 # --------------------------------------------------------------------------
+# LiDAR sensor (settings.json "LidarSensor1") -- real metric range data,
+# complementing the camera/U-Net occupancy map. The camera stays
+# responsible for *where* free space is (wide 90 deg FOV, semantic
+# understanding of roads/vegetation/buildings via the trained U-Net);
+# LiDAR is responsible for *how far away* the nearest obstacle actually is,
+# straight from ray returns -- far more reliable for deciding how urgently
+# to brake/steer than a probability heatmap alone. See lidar.py.
+# --------------------------------------------------------------------------
+LIDAR_NAME = "LidarSensor1"
+LIDAR_NUM_SECTORS = 7            # horizontal angular bins across the sensor's FOV, left -> right
+LIDAR_HFOV_DEG = 180.0           # matches settings.json HorizontalFOVStart/End (-90..90)
+LIDAR_MAX_RANGE = 20.0           # meters; no return (or a return beyond this) counts as fully clear
+LIDAR_STEER_WEIGHT = 0.6         # blend weight for lidar vs camera steering signal in the safety shield (0..1)
+
+# --------------------------------------------------------------------------
 # Live occupancy-map HUD (live_view.py) -- purely a visualization, never read
 # by the policy or reward. Shows the 5x5 probability grid with markers for
 # the goal bearing and the currently executed steering direction.
@@ -24,13 +39,25 @@ LIVE_VIEW_CELL_PX = 70          # each grid cell is rendered this many pixels sq
 # --------------------------------------------------------------------------
 # State / action space
 # --------------------------------------------------------------------------
-STATE_DIM = OCC_GRID * OCC_GRID + 3   # 25 (flattened grid) + dx, dy, dz = 28
-
 # Action space (Eq. 9): continuous body-frame [v_forward, v_lateral, yaw_rate]
 # in [-1, 1], driven through AirSim's moveByVelocityBodyFrameAsync (Section
 # 3.4). Altitude is held automatically via the Eq. 13 cruise-altitude
 # controller, not commanded by the policy.
 ACTION_DIM = 3
+
+# State (Eq. 7, extended):
+#   25  flattened camera/U-Net occupancy grid  (Vvisual, Eq. 5)
+#    3  relative target displacement [dx, dy, dz]  (Eq. 6)
+#    7  LiDAR per-sector closeness (lidar.py)           -- real metric ranging
+#    2  heading, as [sin(yaw), cos(yaw)]                -- the policy
+#       previously had no direct way to perceive its own orientation
+#    3  measured body-frame velocity [vf, vl, vz], normalized by V_MAX      -- or
+#       knowledge of its own current motion, which made precise
+#       braking/final-approach and body-relative steering harder to learn
+#    3  current smoothed command [v_forward,v_lateral,yaw_rate], in [-1,1] --
+#       lets the policy "remember" what it's already commanding without
+#       relying purely on the LSTM's hidden state for that
+STATE_DIM = OCC_GRID * OCC_GRID + 3 + LIDAR_NUM_SECTORS + 2 + 3 + ACTION_DIM
 
 # --------------------------------------------------------------------------
 # Physical UAV motion constraints (Eq. 10-13)
@@ -101,6 +128,27 @@ OBSTACLE_DANGER_PENALTY_3 = 60.0
 # can't be farmed by hovering in open space.
 CLEARANCE_SAFE_THRESHOLD = 0.1
 CLEARANCE_BONUS_COEFF = 0.5
+
+# Graduated LiDAR obstacle-distance penalty: the metric-range counterpart to
+# OBSTACLE_DANGER_RADIUS_* above, using actual ranged distance (meters) in
+# the frontal LiDAR sectors instead of a camera-derived occupancy
+# probability -- a much more direct "how close is the nearest obstacle,
+# really" signal. Thresholds trip when distance drops BELOW the radius
+# (the inverse comparison from the probability-based bands), and likewise
+# stack and are charged every step, since this is a pure cost with no
+# loiter-exploit risk.
+LIDAR_DANGER_DIST_1 = 8.0        # meters
+LIDAR_DANGER_PENALTY_1 = 10.0
+LIDAR_DANGER_DIST_2 = 4.0        # meters
+LIDAR_DANGER_PENALTY_2 = 30.0
+LIDAR_DANGER_DIST_3 = 2.0        # meters
+LIDAR_DANGER_PENALTY_3 = 80.0
+
+# LiDAR clear-path bonus: positive counterpart, rewarding forward progress
+# when the nearest *ranged* obstacle in front is confidently far away --
+# the metric-distance version of CLEARANCE_SAFE_THRESHOLD/CLEARANCE_BONUS_COEFF.
+LIDAR_CLEARANCE_SAFE_DIST = 12.0  # meters
+LIDAR_CLEARANCE_BONUS_COEFF = 0.5
 
 # Free-space-weighted motion reward: forward progress is scaled by
 # (1 - frontal occupancy), i.e. the same frozen U-Net probability map is
