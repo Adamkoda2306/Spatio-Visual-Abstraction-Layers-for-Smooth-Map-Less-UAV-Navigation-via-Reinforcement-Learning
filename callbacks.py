@@ -24,7 +24,7 @@ class EpisodeLogCallback(BaseCallback):
     console or plotted later from the CSV.
     """
 
-    def __init__(self, verbose=0, bucket_size=100, log_dir=None):
+    def __init__(self, verbose=0, bucket_size=50, log_dir=None):
         super().__init__(verbose)
         self.episode_count = 0
         self.bucket_size = bucket_size
