@@ -68,6 +68,7 @@ class AirSimUAVEnv(gym.Env):
 
         self._goal = np.zeros(3, dtype=np.float32)
         self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)  # [v_forward,v_lateral,yaw_rate]
+        self._vz_smooth = 0.0
         self._last_pos = np.array(config.START_POSITION, dtype=np.float32)
         self._prev_dist = None
         self._step_count = 0
@@ -118,6 +119,7 @@ class AirSimUAVEnv(gym.Env):
         self._collision_baseline_ts = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name).time_stamp
 
         self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)
+        self._vz_smooth = 0.0
         self._step_count = 0
         self._danger_ema = 0.0
         self._steer_ema = 0.0
@@ -218,7 +220,10 @@ class AirSimUAVEnv(gym.Env):
 
         # Eq. 13: hold the cruise altitude H_MAX using the z recorded at the
         # end of the previous step (avoids an extra AirSim round-trip here).
-        vz = float(np.clip(-(self._last_pos[2] + config.H_MAX), -config.V_MAX, config.V_MAX))
+        vz_target = float(np.clip(-(self._last_pos[2] + config.H_MAX), -config.V_MAX, config.V_MAX))
+        # Apply the same EMA as the policy commands to vertical velocity.
+        self._vz_smooth = (1 - config.ALPHA_SMOOTH) * self._vz_smooth + config.ALPHA_SMOOTH * vz_target
+        vz = float(self._vz_smooth)
 
         self.client.moveByVelocityBodyFrameAsync(
             v_forward,
