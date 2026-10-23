@@ -47,7 +47,10 @@ ACTION_DIM = 3
 
 # State (Eq. 7, extended):
 #   25  flattened camera/U-Net occupancy grid  (Vvisual, Eq. 5)
-#    3  relative target displacement [dx, dy, dz]  (Eq. 6)
+#    3  relative target displacement [dx, dy, dz]  (Eq. 6), divided by
+#       GOAL_OBS_SCALE and clipped to [-1, 1]
+#    1  goal bearing relative to heading, in [-1, 1] (0 = dead ahead,
+#       -0.5 = 90 deg left, +-1 = directly behind)
 #    7  LiDAR per-sector closeness (lidar.py)           -- real metric ranging
 #    2  heading, as [sin(yaw), cos(yaw)]                -- the policy
 #       previously had no direct way to perceive its own orientation
@@ -57,123 +60,74 @@ ACTION_DIM = 3
 #    3  current smoothed command [v_forward,v_lateral,yaw_rate], in [-1,1] --
 #       lets the policy "remember" what it's already commanding without
 #       relying purely on the LSTM's hidden state for that
-STATE_DIM = OCC_GRID * OCC_GRID + 3 + LIDAR_NUM_SECTORS + 2 + 3 + ACTION_DIM
+STATE_DIM = OCC_GRID * OCC_GRID + 3 + 1 + LIDAR_NUM_SECTORS + 2 + 3 + ACTION_DIM
 
 # --------------------------------------------------------------------------
 # Physical UAV motion constraints (Eq. 10-13)
 # --------------------------------------------------------------------------
 V_MAX = 5.0            # m/s, forward/lateral velocity scale
-OMEGA_MAX = 5.0         # deg/s, yaw rate scale
+OMEGA_MAX = 30.0        # deg/s, yaw rate scale (5 deg/s = 1.5 deg/step, too slow to turn toward the goal)
 H_MAX = 10.0            # m, cruise altitude (AirSim NED: z = -H_MAX)
 
 # --------------------------------------------------------------------------
 # Velocity smoothing / jerk regularization
 # --------------------------------------------------------------------------
-ALPHA_SMOOTH = 0.05   # first-order low-pass EMA responsiveness coefficient
+ALPHA_SMOOTH = 0.1    # first-order low-pass EMA responsiveness coefficient
                         # (Table 2: alpha in {0.001, 0.005, 0.01, 0.05, 0.1};
                         # 0.005-0.01 gave the best reward / episode length trade-off)
 
 # --------------------------------------------------------------------------
 # Reward shaping constants (Section 4)
+#
+# Deliberately small and bounded: per-step reward stays within roughly
+# [-3, +1.2] and a whole episode return within roughly [-60, +250], so the
+# critic's value targets stay well-scaled. (The previous multi-band version
+# let returns span -78,000..+5,000, which blew the value loss up into the
+# millions and let max_grad_norm clip the actor's updates to nothing.)
 # --------------------------------------------------------------------------
-R_TIME = -0.02
-R_SUCCESS = 2000.0
-R_COLLISION = -1000.0
-R_TIMEOUT = -1000.0
+R_TIME = -0.01                # per-step decay, encourages reaching the goal quickly
+R_SUCCESS = 100.0
+R_COLLISION = -60.0         # must outweigh progress banked en route, or a late crash still nets positive
+R_TIMEOUT = -10.0
 SUCCESS_RADIUS = 2.0          # meters
 MAX_EPISODE_STEPS = 600        # shorter episodes -> more terminal-reward samples per training budget
-OBS_FRONT_THRESHOLD = 0.3
-JERK_COEFF = 0.05
-YAW_ALIGN_COEFF = 0.2
-LATERAL_ESCAPE_COEFF = 1.0
-YAW_RATE_PENALTY_COEFF = 0.4
-MOTION_FORWARD_COEFF = 0.3
-MOTION_SMOOTH_COEFF = 0.4
-OBS_FRONT_COEFF = 4.0
-OBS_GLOBAL_COEFF = 1.0
-PROGRESS_LINEAR_COEFF = 20.0
-PROGRESS_INVERSE_COEFF = 100.0
+YAW_ALIGN_COEFF = 0.1         # r_yaw = coeff * (1 - 2 * |heading error| / 180), in [-coeff, +coeff]; zero-centered so
+                              # facing the goal while hovering can't out-earn actually flying there
+JERK_COEFF = 0.01             # r_jerk = -coeff * ||cmd_target - cmd_smooth||
 
-# Distance-to-target shaping, proximity milestones, and idle penalty --
-# re-added to match the earlier envF.py prototype's reward (on top of the
-# Eq. 17 progress term, which is kept unchanged).
-DISTANCE_PENALTY_COEFF = 0.05   # -0.05 * distance, every non-terminal step
-INVERSE_DISTANCE_COEFF = 1.0    # +1.0 / (distance + 1)
-MILESTONE_RADIUS_1 = 50.0       # meters
-MILESTONE_BONUS_1 = 50.0
-MILESTONE_RADIUS_2 = 20.0       # meters
-MILESTONE_BONUS_2 = 100.0
-MILESTONE_RADIUS_3 = 10.0       # meters
-MILESTONE_BONUS_3 = 300.0
-IDLE_PROGRESS_THRESHOLD = 0.01  # meters of progress per step below which it counts as "idle"
-IDLE_PENALTY = 5
+# Single smooth LiDAR barrier on the nearest frontal range (meters):
+#   b(r)  = max(0, 1 - r / LIDAR_SAFE_DIST)
+#   r_obs = -LIDAR_PENALTY_COEFF * max(b(front_range), LIDAR_SIDE_WEIGHT * b(any_sector_range))   in [-coeff, 0]
+# Replaces the stacked camera/LiDAR danger bands, which dropped the reward
+# off a cliff (-10/-25/-60 and -10/-30/-80 per step) instead of giving the
+# policy a gradient to follow away from obstacles.
+LIDAR_SAFE_DIST = 6.0
+LIDAR_PENALTY_COEFF = 2.0
+LIDAR_SIDE_WEIGHT = 0.5      # side/rear sectors count half as much as the frontal sectors
 
-# Graduated obstacle-proximity penalty: escalating bands on frontal
-# occupancy (o_front), structurally mirroring the goal proximity milestones
-# above but pushing away from danger instead of toward a target. Charged
-# EVERY step the condition holds (not one-time like the goal milestones --
-# there's no hovering-exploit risk with a pure penalty, so repeating it is
-# the point: the longer it stays pointed at something dangerous, the more
-# it costs). Bands stack, so o_front > 0.7 pays all three penalties.
-OBSTACLE_DANGER_RADIUS_1 = 0.3   # same threshold as OBS_FRONT_THRESHOLD/the lateral-escape trigger
-OBSTACLE_DANGER_PENALTY_1 = 10.0
-OBSTACLE_DANGER_RADIUS_2 = 0.5
-OBSTACLE_DANGER_PENALTY_2 = 25.0
-OBSTACLE_DANGER_RADIUS_3 = 0.7
-OBSTACLE_DANGER_PENALTY_3 = 60.0
+# --------------------------------------------------------------------------
+# Observation scaling / altitude hold
+# --------------------------------------------------------------------------
+# Relative target displacement [dx, dy, dz] is divided by this (meters) and
+# clipped to [-1, 1] so it sits on the same scale as every other state
+# feature (the raw values reach ~165 m, drowning out the [0,1] camera/LiDAR
+# features). Must be >= the largest goal distance used.
+GOAL_OBS_SCALE = 200.0
 
-# Clear-path bonus: the positive counterpart to the penalty bands above --
-# extra reward (on top of r_space) for making forward progress while the
-# frontal occupancy is confidently clear. Tied to forward_progress so it
-# can't be farmed by hovering in open space.
-CLEARANCE_SAFE_THRESHOLD = 0.1
-CLEARANCE_BONUS_COEFF = 0.5
-
-# Graduated LiDAR obstacle-distance penalty: the metric-range counterpart to
-# OBSTACLE_DANGER_RADIUS_* above, using actual ranged distance (meters) in
-# the frontal LiDAR sectors instead of a camera-derived occupancy
-# probability -- a much more direct "how close is the nearest obstacle,
-# really" signal. Thresholds trip when distance drops BELOW the radius
-# (the inverse comparison from the probability-based bands), and likewise
-# stack and are charged every step, since this is a pure cost with no
-# loiter-exploit risk.
-LIDAR_DANGER_DIST_1 = 8.0        # meters
-LIDAR_DANGER_PENALTY_1 = 10.0
-LIDAR_DANGER_DIST_2 = 4.0        # meters
-LIDAR_DANGER_PENALTY_2 = 30.0
-LIDAR_DANGER_DIST_3 = 2.0        # meters
-LIDAR_DANGER_PENALTY_3 = 80.0
-
-# LiDAR clear-path bonus: positive counterpart, rewarding forward progress
-# when the nearest *ranged* obstacle in front is confidently far away --
-# the metric-distance version of CLEARANCE_SAFE_THRESHOLD/CLEARANCE_BONUS_COEFF.
-LIDAR_CLEARANCE_SAFE_DIST = 12.0  # meters
-LIDAR_CLEARANCE_BONUS_COEFF = 0.5
-
-# Free-space-weighted motion reward: forward progress is scaled by
-# (1 - frontal occupancy), i.e. the same frozen U-Net probability map is
-# additionally read as "how rewarding is moving in this direction" --
-# moving through cells the map scores as open earns close to the full
-# motion reward, moving into cells it scores as obstructed earns almost
-# none. The U-Net itself is untouched (still a supervised, fixed-during-RL
-# obstacle detector, see unet.py); only the reward shaping is extended.
-FREE_MOTION_COEFF = 0.4
-
-# Free-space-seeking shaping: while something blocks the frontal column,
-# reward lateral velocity that agrees with the occupancy-grid's estimated
-# free-space bearing (see occupancy.avoidance_steer), so the policy is
-# explicitly taught "steer toward the open part of the probability map"
-# instead of relying only on collision penalties to discover that.
-FREESPACE_COEFF = 0.5
+# Eq. 13 altitude hold: vz = clip(-(z + H_MAX), -VZ_MAX, VZ_MAX), applied
+# directly (no EMA) so altitude corrections are immediate.
+VZ_MAX = 2.0
 
 # --------------------------------------------------------------------------
 # Perception-driven safety shield (airsim_env.py only -- does NOT touch the
-# reward function above). The reward still scores the agent on its own raw
-# action exactly as before; this just clamps what actually gets flown so the
-# U-Net occupancy grid can veto/soften a command that's about to fly straight
-# into an obstacle, instead of relying solely on the reward gradient to teach
-# that behavior over millions of steps.
+# reward function). When enabled it overrides the executed forward/lateral
+# command using the U-Net/LiDAR danger signal, which is NOT what the policy
+# sampled -- PPO then credits the policy's raw action with the shielded
+# outcome (action substitution, an on-policy violation). Keep it OFF while
+# training; turn it on only for deployment/evaluation if you want a
+# hardware-safety wrapper (e.g. test.py experiments).
 # --------------------------------------------------------------------------
+ENABLE_SAFETY_SHIELD = False
 AVOID_DANGER_THRESHOLD = 0.15   # eye-level occupancy (0-1) above which the shield starts engaging
 AVOID_DANGER_HARD = 0.55        # above this, forward velocity is cut almost to zero regardless of the curve below
 AVOID_STEER_GAIN = 1.5          # added lateral-velocity correction (toward free space) at full danger severity
@@ -181,14 +135,6 @@ AVOID_BRAKE_GAIN = 0.9          # fraction of forward velocity cut at full dange
 AVOID_STEER_SIGN = 1.0          # flip to -1.0 if the drone is observed steering toward obstacles instead of away
 AVOID_EMA_ALPHA = 0.35          # smooths the per-frame danger/steer signal before it drives the shield, so
                                 # single-frame U-Net noise doesn't jerk the lateral/forward output step to step
-                                # (this is what was making the drone visibly shake in 3rd-person view)
-
-# Reward-side penalty (reward.py) for how hard the shield above had to
-# intervene this step (0 when it didn't engage). Closes the credit-
-# assignment gap between "the policy flew at an obstacle" and "the shield
-# quietly fixed it", so the policy has a direct incentive to not need
-# rescuing in the first place instead of leaning on the shield as a crutch.
-SHIELD_PENALTY_COEFF = 5.0
 
 # --------------------------------------------------------------------------
 # AirSim connection
@@ -212,7 +158,7 @@ GOAL_SAMPLING_RADIUS_MIN = 40.0
 GOAL_SAMPLING_RADIUS_MAX = 110.0
 
 # Fixed deployment goal, e.g. (25.0, -40.0, -15.0) in NED meters (z negative = up).
-# Leave as None during training to keep sampling random goals for generalization;
+# train_ppo.py ignores this by default and samples random goals (pass --fixed_goal to use it);
 # set it (or pass --goal_x/--goal_y/--goal_z / reset(options={"goal": (x,y,z)}))
 # to fly to one specific destination.
 # FIXED_GOAL = [80, -97.22, -0.15] # AIRSIMNH

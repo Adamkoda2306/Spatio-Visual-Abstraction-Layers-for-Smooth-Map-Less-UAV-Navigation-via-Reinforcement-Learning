@@ -10,7 +10,7 @@ instead of the plain MLP policy picking each action from the current
 state alone.
 
 Usage:
-    # random goal each episode (generalizing policy)
+    # random goal each episode (default; generalizing policy)
     env\\Scripts\\python.exe train_ppo.py --timesteps 1000000 --alpha 0.01
 
     # train to reach one fixed (x, y, z) NED destination => goal 131.94, -275.53, -10.0 or 127.32, 25.28, -0.15 (AIRSIMNH)
@@ -51,16 +51,23 @@ def main():
     parser.add_argument("--goal_x", type=float, default=None, help="fixed training goal X (NED, meters)")
     parser.add_argument("--goal_y", type=float, default=None, help="fixed training goal Y (NED, meters)")
     parser.add_argument("--goal_z", type=float, default=None, help="fixed training goal Z (NED, meters, negative=up)")
+    parser.add_argument("--fixed_goal", action="store_true",
+                         help="train toward config.FIXED_GOAL instead of sampling a new random goal every episode")
     args = parser.parse_args()
 
     config.ALPHA_SMOOTH = args.alpha
+
+    if not args.fixed_goal:
+        config.FIXED_GOAL = None  # random goals by default; explicit --goal_* still wins
 
     goal = None
     if args.goal_x is not None and args.goal_y is not None and args.goal_z is not None:
         goal = (args.goal_x, args.goal_y, args.goal_z)
         print(f"Training toward fixed goal: {goal}")
+    elif config.FIXED_GOAL is not None:
+        print(f"Training toward config.FIXED_GOAL: {config.FIXED_GOAL}")
     else:
-        print("fixed goal given for each episode.")
+        print("Random goal sampled each episode.")
 
     os.makedirs(config.LOG_DIR, exist_ok=True)
     os.makedirs(config.MODEL_DIR, exist_ok=True)
@@ -74,24 +81,23 @@ def main():
             "MlpLstmPolicy",
             env,
             learning_rate=linear_schedule(3e-4, 1e-5),   # anneal LR instead of a fixed 3e-4 for the whole run
-            n_steps=256,              # shorter rollout buffer suits BPTT through the LSTM
-            batch_size=64,
+            n_steps=1024,             # >1 full episode (<=600 steps) per rollout, so fewer bootstrapped fragments
+            batch_size=256,
             n_epochs=10,
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,          # Eq. 14, epsilon = 0.2
-            ent_coef=0.01,           # keep some exploration going instead of collapsing to a greedy policy early
+            ent_coef=0.001,          # small: a large bonus on continuous actions just keeps std pinned wide
             vf_coef=0.5,
             max_grad_norm=0.5,
             policy_kwargs=dict(
                 net_arch=dict(pi=[128, 128], vf=[128, 128]),
                 lstm_hidden_size=128,
                 n_lstm_layers=1,
-                # std starts smaller than SB3's default (1.0) so early rollouts explore with
-                # gentle velocity commands instead of constantly saturating at +/-1 (bang-bang
-                # flight), which was previously the main cause of early-training collisions.
-                
-                # log_std_init=-1.0,
+                # std starts at exp(-1.5) ~= 0.22 instead of SB3's default 1.0, so early
+                # rollouts explore with gentle velocity commands instead of constantly
+                # saturating at +/-1 (bang-bang flight into walls).
+                log_std_init=-1.5,
             ),
             tensorboard_log=config.LOG_DIR,
             verbose=1,
@@ -102,7 +108,8 @@ def main():
         save_path=config.MODEL_DIR,
         name_prefix=f"ppo_uav_alpha{args.alpha}",
     )
-    episode_log_cb = EpisodeLogCallback()
+    episode_log_cb = EpisodeLogCallback(
+        best_model_path=os.path.join(config.MODEL_DIR, f"ppo_uav_best_alpha{args.alpha}.zip"))
     callback = CallbackList([checkpoint_cb, episode_log_cb])
 
     model.learn(total_timesteps=args.timesteps, callback=callback, tb_log_name="ppo")

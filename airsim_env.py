@@ -4,7 +4,7 @@ the spatio-visual navigation pipeline from Section 3 of the paper:
 
   camera -> U-Net -> 5x5 occupancy compression -> 28-dim state
   -> continuous velocity action -> exponential command smoothing -> AirSim execution
-  -> multi-modal reward (Section 4)
+  -> bounded reward (reward.py)
 
 Control: the action is [v_forward, v_lateral, yaw_rate] in [-1, 1] (Eq. 9),
 executed through AirSim's `moveByVelocityBodyFrameAsync` (Section 3.4).
@@ -15,8 +15,9 @@ the paper actually optimizes over.
 Perception is dual-sensor: the camera/U-Net occupancy grid (Eq. 3-5) gives a
 wide-FOV, semantic read of where free space and obstacles roughly are; the
 LiDAR sensor (lidar.py) gives real metric range in meters for how close the
-nearest obstacle actually is. Both feed the state, the safety shield, and
-the reward function (reward.py).
+nearest obstacle actually is. Both feed the state; LiDAR range also feeds
+the reward (reward.py). The optional safety shield (config.ENABLE_SAFETY_SHIELD,
+OFF by default) is the only thing that can alter the policy's executed action.
 
 Goal: pass an explicit (x, y, z) NED destination via the constructor, via
 `reset(options={"goal": (x, y, z)})`, or via config.FIXED_GOAL. If none is
@@ -68,7 +69,6 @@ class AirSimUAVEnv(gym.Env):
 
         self._goal = np.zeros(3, dtype=np.float32)
         self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)  # [v_forward,v_lateral,yaw_rate]
-        self._vz_smooth = 0.0
         self._last_pos = np.array(config.START_POSITION, dtype=np.float32)
         self._prev_dist = None
         self._step_count = 0
@@ -80,7 +80,6 @@ class AirSimUAVEnv(gym.Env):
         self._danger_ema_l = 0.0
         self._steer_ema_l = 0.0
         self._collision_baseline_ts = 0
-        self._milestones_hit = set()  # proximity-milestone keys already paid out this episode (reward.py)
         self.trajectory = []  # populated during episodes for plotting/analysis
 
     # ------------------------------------------------------------------
@@ -119,13 +118,11 @@ class AirSimUAVEnv(gym.Env):
         self._collision_baseline_ts = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name).time_stamp
 
         self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)
-        self._vz_smooth = 0.0
         self._step_count = 0
         self._danger_ema = 0.0
         self._steer_ema = 0.0
         self._danger_ema_l = 0.0
         self._steer_ema_l = 0.0
-        self._milestones_hit = set()
         self.trajectory = []
 
         pos, yaw_deg = self._get_pose()
@@ -148,71 +145,15 @@ class AirSimUAVEnv(gym.Env):
 
     def step(self, action):
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
-        a_forward, a_lateral, a_yaw_rate = action
 
         # Eq. 23: first-order exponential smoothing of the raw velocity
         # command, so stick inputs don't change abruptly.
         cmd_target = action
         self._cmd_smooth = (1 - config.ALPHA_SMOOTH) * self._cmd_smooth + config.ALPHA_SMOOTH * cmd_target
 
-        # Perception-driven safety shield: softens the *executed*
-        # forward/lateral velocity using the U-Net occupancy grid from what
-        # the drone currently sees (self._last_grid, set at the end of the
-        # previous step/reset), so an action that would fly straight into an
-        # obstacle gets steered toward the free space in the probability map
-        # instead of relying purely on the reward gradient to learn that
-        # over millions of steps. The reward below still scores the agent's
-        # own raw action (a_yaw_rate, a_lateral) exactly as before -- this
-        # only changes what actually gets flown.
-        #
-        # danger/steer are EMA-smoothed across steps before being used: a raw
-        # per-frame U-Net reading is noisy (lighting flicker, a leaf moving,
-        # slight pose jitter), and reacting to every single-frame blip is
-        # exactly what made the drone visibly shake in 3rd-person view. The
-        # EMA alpha is deliberately much faster than ALPHA_SMOOTH (which
-        # smooths the *raw action*, not this safety signal), so real,
-        # persistent obstacles are still reacted to within a few steps.
-        raw_steer, raw_danger = avoidance_steer(self._last_grid)
-        self._danger_ema += config.AVOID_EMA_ALPHA * (raw_danger - self._danger_ema)
-        self._steer_ema += config.AVOID_EMA_ALPHA * (raw_steer - self._steer_ema)
-
-        # Same EMA-smoothing treatment for the LiDAR signal (from
-        # self._last_lidar_closeness, set at the end of the previous
-        # step/reset -- same one-step lag as the camera grid above).
-        raw_steer_l, raw_danger_l = lidar_mod.steer_from_closeness(self._last_lidar_closeness)
-        self._danger_ema_l += config.AVOID_EMA_ALPHA * (raw_danger_l - self._danger_ema_l)
-        self._steer_ema_l += config.AVOID_EMA_ALPHA * (raw_steer_l - self._steer_ema_l)
-
-        # Combine both sensors: take the worse (higher) of the two danger
-        # readings -- if either sensor says "something is close", that's
-        # trusted, since a miss by one sensor (e.g. a thin pole the camera's
-        # segmentation doesn't flag, or a reflective/glass surface LiDAR
-        # misses) shouldn't let danger go unnoticed. Steering is a weighted
-        # blend favoring LiDAR (LIDAR_STEER_WEIGHT), since it's a direct
-        # metric reading rather than an inferred probability.
-        danger = max(self._danger_ema, self._danger_ema_l)
-        steer_lr = (
-            config.LIDAR_STEER_WEIGHT * self._steer_ema_l
-            + (1.0 - config.LIDAR_STEER_WEIGHT) * self._steer_ema
-        )
-
         exec_forward, exec_lateral = float(self._cmd_smooth[0]), float(self._cmd_smooth[1])
-        shield_severity = 0.0
-        if danger > config.AVOID_DANGER_THRESHOLD:
-            severity = min(1.0, (danger - config.AVOID_DANGER_THRESHOLD) / (1.0 - config.AVOID_DANGER_THRESHOLD))
-            severity = severity ** 0.5  # react hard early rather than waiting for danger -> 1.0
-            shield_severity = severity
-            exec_lateral = float(np.clip(
-                exec_lateral + config.AVOID_STEER_SIGN * config.AVOID_STEER_GAIN * severity * steer_lr,
-                -1.0, 1.0,
-            ))
-            exec_forward = float(exec_forward * (1.0 - config.AVOID_BRAKE_GAIN * severity))
-
-        if danger > config.AVOID_DANGER_HARD:
-            # something fills the center of the frame right now -- stop
-            # closing distance on it almost entirely regardless of the
-            # smooth curve above, and let the lateral correction do the dodging.
-            exec_forward = float(exec_forward * 0.05)
+        if config.ENABLE_SAFETY_SHIELD:
+            exec_forward, exec_lateral = self._apply_safety_shield(exec_forward, exec_lateral)
 
         v_forward = exec_forward * config.V_MAX
         v_lateral = exec_lateral * config.V_MAX
@@ -220,10 +161,9 @@ class AirSimUAVEnv(gym.Env):
 
         # Eq. 13: hold the cruise altitude H_MAX using the z recorded at the
         # end of the previous step (avoids an extra AirSim round-trip here).
-        vz_target = float(np.clip(-(self._last_pos[2] + config.H_MAX), -config.V_MAX, config.V_MAX))
-        # Apply the same EMA as the policy commands to vertical velocity.
-        self._vz_smooth = (1 - config.ALPHA_SMOOTH) * self._vz_smooth + config.ALPHA_SMOOTH * vz_target
-        vz = float(self._vz_smooth)
+        # Direct proportional hold, no EMA: altitude is not the policy's job,
+        # so corrections must be immediate rather than lagging ~6 s behind.
+        vz = float(np.clip(-(self._last_pos[2] + config.H_MAX), -config.VZ_MAX, config.VZ_MAX))
 
         self.client.moveByVelocityBodyFrameAsync(
             v_forward,
@@ -245,9 +185,7 @@ class AirSimUAVEnv(gym.Env):
         grid = self._get_occupancy_grid()
         self._last_grid = grid
 
-        # Fresh LiDAR reading for this step's state/reward (the lagged
-        # self._last_lidar_* used above for the shield gets overwritten with
-        # this fresh reading for next step, same pattern as self._last_grid).
+        # Fresh LiDAR reading for this step's state/reward.
         lidar_closeness, lidar_ranges = self._get_lidar_data()
         self._last_lidar_closeness = lidar_closeness
         self._last_lidar_ranges = lidar_ranges
@@ -267,16 +205,11 @@ class AirSimUAVEnv(gym.Env):
             current_yaw_deg=yaw_deg,
             dx=dx,
             dy=dy,
-            yaw_rate_norm=a_yaw_rate,
-            lateral_norm=a_lateral,
-            body_velocity=body_velocity,
             cmd_smooth=self._cmd_smooth,
             cmd_target=cmd_target,
             occupancy_grid=grid,
             collided=collided,
             timed_out=timed_out,
-            milestones_hit=self._milestones_hit,
-            shield_severity=shield_severity,
             lidar_front_m=lidar_front_m,
             lidar_global_m=lidar_global_m,
         )
@@ -288,11 +221,52 @@ class AirSimUAVEnv(gym.Env):
         terminated = bool(success or collided)
         truncated = bool(timed_out and not terminated)
 
-        info.update(dict(success=success, collided=collided, timed_out=timed_out, distance=d_curr))
+        # "TimeLimit.truncated" makes SB3 bootstrap the value at a timeout
+        # instead of treating it as a true terminal state.
+        info.update(dict(success=success, collided=collided, timed_out=timed_out, distance=d_curr,
+                         **{"TimeLimit.truncated": truncated}))
+        if collided:
+            info["collision_object"] = collision_info.object_name
 
         self._show_live_view(grid, yaw_deg, dx, dy, exec_lateral, d_curr)
 
         return obs.astype(np.float32), float(reward), terminated, truncated, info
+
+    def _apply_safety_shield(self, exec_forward, exec_lateral):
+        """Optional perception-driven shield (config.ENABLE_SAFETY_SHIELD):
+        brakes and steers the *executed* command toward free space using the
+        previous step's U-Net grid and LiDAR closeness. Never enable during
+        RL training -- the rollout buffer keeps the policy's raw action, so
+        shield rescues get credited to actions that would have crashed."""
+        # danger/steer are EMA-smoothed across steps: a raw per-frame U-Net
+        # reading is noisy and reacting to every blip makes the drone shake.
+        raw_steer, raw_danger = avoidance_steer(self._last_grid)
+        self._danger_ema += config.AVOID_EMA_ALPHA * (raw_danger - self._danger_ema)
+        self._steer_ema += config.AVOID_EMA_ALPHA * (raw_steer - self._steer_ema)
+
+        raw_steer_l, raw_danger_l = lidar_mod.steer_from_closeness(self._last_lidar_closeness)
+        self._danger_ema_l += config.AVOID_EMA_ALPHA * (raw_danger_l - self._danger_ema_l)
+        self._steer_ema_l += config.AVOID_EMA_ALPHA * (raw_steer_l - self._steer_ema_l)
+
+        # Worse of the two danger readings; steering favors LiDAR.
+        danger = max(self._danger_ema, self._danger_ema_l)
+        steer_lr = (
+            config.LIDAR_STEER_WEIGHT * self._steer_ema_l
+            + (1.0 - config.LIDAR_STEER_WEIGHT) * self._steer_ema
+        )
+
+        if danger > config.AVOID_DANGER_THRESHOLD:
+            severity = min(1.0, (danger - config.AVOID_DANGER_THRESHOLD) / (1.0 - config.AVOID_DANGER_THRESHOLD))
+            severity = severity ** 0.5  # react hard early rather than waiting for danger -> 1.0
+            exec_lateral = float(np.clip(
+                exec_lateral + config.AVOID_STEER_SIGN * config.AVOID_STEER_GAIN * severity * steer_lr,
+                -1.0, 1.0,
+            ))
+            exec_forward = float(exec_forward * (1.0 - config.AVOID_BRAKE_GAIN * severity))
+
+        if danger > config.AVOID_DANGER_HARD:
+            exec_forward = float(exec_forward * 0.05)
+        return exec_forward, exec_lateral
 
     def close(self):
         try:
@@ -378,10 +352,15 @@ class AirSimUAVEnv(gym.Env):
         v_visual = flatten_grid(grid)  # Eq. 5, 25-dim
         yaw_rad = math.radians(yaw_deg)
         heading = np.array([math.sin(yaw_rad), math.cos(yaw_rad)], dtype=np.float32)
+        goal_rel = np.clip(np.array([dx, dy, dz], dtype=np.float32) / config.GOAL_OBS_SCALE, -1.0, 1.0)
+        # signed heading error to the goal, wrapped to [-pi, pi) and scaled to [-1, 1)
+        bearing = (math.atan2(dy, dx) - yaw_rad + math.pi) % (2 * math.pi) - math.pi
+        goal_bearing = np.array([bearing / math.pi], dtype=np.float32)
         vel_norm = np.clip(np.asarray(body_velocity, dtype=np.float32) / config.V_MAX, -1.0, 1.0)
         return np.concatenate([
             v_visual,                                   # 25: camera/U-Net occupancy (Eq. 5)
-            [dx, dy, dz],                                # 3:  relative target displacement (Eq. 6)
+            goal_rel,                                    # 3:  relative target displacement (Eq. 6), scaled to [-1,1]
+            goal_bearing,                                # 1:  goal bearing relative to heading, [-1,1]
             lidar_closeness.astype(np.float32),          # 7:  LiDAR per-sector closeness
             heading,                                     # 2:  sin(yaw), cos(yaw)
             vel_norm,                                    # 3:  measured body velocity, normalized

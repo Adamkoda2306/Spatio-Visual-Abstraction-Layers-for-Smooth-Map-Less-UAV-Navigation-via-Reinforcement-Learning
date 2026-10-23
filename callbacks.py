@@ -24,8 +24,11 @@ class EpisodeLogCallback(BaseCallback):
     console or plotted later from the CSV.
     """
 
-    def __init__(self, verbose=0, bucket_size=50, log_dir=None):
+    def __init__(self, verbose=0, bucket_size=50, log_dir=None, best_model_path=None):
         super().__init__(verbose)
+        self.best_model_path = best_model_path
+        self._best_success_rate = -1.0
+        self._reward_parts = {}  # env_idx -> running per-episode sum of each r_* reward component
         self.episode_count = 0
         self.bucket_size = bucket_size
         self.log_dir = log_dir or config.LOG_DIR
@@ -55,9 +58,18 @@ class EpisodeLogCallback(BaseCallback):
             if dist is not None:
                 self._min_dist[idx] = min(self._min_dist.get(idx, dist), dist)
 
+            parts = self._reward_parts.setdefault(idx, {})
+            for key, val in info.items():
+                if key.startswith("r_"):
+                    parts[key] = parts.get(key, 0.0) + float(val)
+
             episode = info.get("episode")
             if episode is None:
                 continue
+
+            # per-episode reward breakdown in TensorBoard, to see which term drives returns
+            for key, val in self._reward_parts.pop(idx, {}).items():
+                self.logger.record_mean(f"episode_reward/{key}", val)
 
             self.episode_count += 1
             final_dist = dist if dist is not None else float("nan")
@@ -68,7 +80,8 @@ class EpisodeLogCallback(BaseCallback):
 
             print(f"Episode {self.episode_count}, Reward: {episode['r']:.2f}, Steps: {episode['l']}")
             print(f"Final distance: {final_dist:.2f} m, Minimum distance: {min_dist:.2f} m")
-            print(f"STATUS => SUCCESS: {success}, COLLISION: {collided}, TIMEOUT: {timed_out}")
+            print(f"STATUS => SUCCESS: {success}, COLLISION: {collided}, TIMEOUT: {timed_out}"
+                  + (f", HIT: {info['collision_object']}" if collided and info.get("collision_object") else ""))
             print()
 
             self._append_csv(self._episode_csv_path, [
@@ -107,6 +120,12 @@ class EpisodeLogCallback(BaseCallback):
             start, end, f"{success_rate:.2f}", f"{collision_rate:.2f}", f"{timeout_rate:.2f}",
             f"{mean_final:.4f}", f"{mean_min:.4f}",
         ])
+
+        # keep the best 50-episode window so a later collapse can't lose it
+        if self.best_model_path and success_rate > self._best_success_rate:
+            self._best_success_rate = success_rate
+            self.model.save(self.best_model_path)
+            print(f"New best success rate {success_rate:.0f}% -> saved {self.best_model_path}")
 
         self._bucket.clear()
 
