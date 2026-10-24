@@ -166,6 +166,14 @@ ACTION_DURATION = 0.3
 # exactly ACTION_DURATION of simulated time (simContinueForTime), for
 # deterministic, latency-free stepping (only for comparison/debugging).
 SYNC_STEPPING = False
+
+# Must equal "ClockSpeed" in AirSim's settings.json (restart AirSim after
+# changing it). All durations in this file (ACTION_DURATION, the reward's dt,
+# COMMAND_HOLD_DURATION) are SIMULATED seconds; real-time stepping converts
+# between wall-clock and sim time with this factor. Raise gradually (2, 3, ...)
+# and stop at the first erratic flight/physics; the gain is limited by how fast
+# the camera + U-Net + LiDAR processing runs, since that is wall-clock time.
+CLOCK_SPEED = 2.0
 COMMAND_HOLD_DURATION = 5.0
 
 # --------------------------------------------------------------------------

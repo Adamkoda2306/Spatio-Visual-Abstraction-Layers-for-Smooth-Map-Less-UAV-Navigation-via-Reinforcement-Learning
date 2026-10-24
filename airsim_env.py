@@ -198,9 +198,10 @@ class AirSimUAVEnv(gym.Env):
             self.client.simContinueForTime(config.ACTION_DURATION)
             dt = config.ACTION_DURATION
         else:
-            # let the command act for at least ACTION_DURATION since the last
-            # sensor read; if policy + processing already took longer, don't wait
-            remaining = config.ACTION_DURATION - (time.perf_counter() - self._last_sense_time)
+            # let the command act for at least ACTION_DURATION (sim seconds, i.e.
+            # ACTION_DURATION / CLOCK_SPEED of wall-clock) since the last sensor
+            # read; if policy + processing already took longer, don't wait
+            remaining = config.ACTION_DURATION / config.CLOCK_SPEED - (time.perf_counter() - self._last_sense_time)
             if remaining > 0:
                 time.sleep(remaining)
 
@@ -230,7 +231,7 @@ class AirSimUAVEnv(gym.Env):
         timed_out = self._step_count >= config.MAX_EPISODE_STEPS
 
         if not config.SYNC_STEPPING:
-            dt = t_pose - self._last_sense_time
+            dt = (t_pose - self._last_sense_time) * config.CLOCK_SPEED  # wall-clock -> simulated seconds
             self._last_sense_time = t_pose
 
         reward, info = compute_reward(
