@@ -40,7 +40,6 @@ def compute_reward(
     occupancy_grid: np.ndarray,   # 5x5 matrix G (logged only, not rewarded)
     collided: bool,
     timed_out: bool,
-    dt: float = config.ACTION_DURATION,  # measured seconds since the previous sensor read
     lidar_front_m: float = config.LIDAR_MAX_RANGE,  # min LiDAR range (meters) in the frontal sectors this step
     lidar_global_m: float = config.LIDAR_MAX_RANGE,  # min LiDAR range (meters) over all sectors this step
 ):
@@ -48,9 +47,8 @@ def compute_reward(
 
     # --- Progress toward the goal ---
     # Distance closed this step, normalized by the farthest the UAV can move
-    # in the elapsed step time (V_MAX * dt), so it lies in [-1, 1]. dt is the
-    # measured time between sensor reads, since real-time steps vary in length.
-    max_step = config.V_MAX * max(dt, 1e-3)
+    # in one step (V_MAX * ACTION_DURATION), so it lies in [-1, 1].
+    max_step = config.V_MAX * config.ACTION_DURATION
     r_progress = float(np.clip((d_prev - d_curr) / max_step, -1.0, 1.0))
 
     # --- Smooth LiDAR obstacle barrier ---
