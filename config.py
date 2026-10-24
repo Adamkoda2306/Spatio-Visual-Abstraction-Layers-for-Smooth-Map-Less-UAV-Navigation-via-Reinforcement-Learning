@@ -88,11 +88,11 @@ ALPHA_SMOOTH = 0.1    # first-order low-pass EMA responsiveness coefficient
 R_TIME = -0.01                # per-step decay, encourages reaching the goal quickly
 R_SUCCESS = 100.0
 R_COLLISION = -60.0         # must outweigh progress banked en route, or a late crash still nets positive
-R_TIMEOUT = -10.0
+R_TIMEOUT = -60.0           # same as a collision: stalling short of the goal must not beat trying (progress banked en route is ~+100)
 SUCCESS_RADIUS = 2.0          # meters
 MAX_EPISODE_STEPS = 600        # shorter episodes -> more terminal-reward samples per training budget
-YAW_ALIGN_COEFF = 0.1         # r_yaw = coeff * (1 - 2 * |heading error| / 180), in [-coeff, +coeff]; zero-centered so
-                              # facing the goal while hovering can't out-earn actually flying there
+YAW_ALIGN_COEFF = 0.1         # r_yaw = -coeff * |heading error| / 180, in [-coeff, 0]; a pure cost, so just
+                              # staying alive facing the goal earns nothing
 JERK_COEFF = 0.01             # r_jerk = -coeff * ||cmd_target - cmd_smooth||
 
 # Single smooth LiDAR barrier on the nearest frontal range (meters):

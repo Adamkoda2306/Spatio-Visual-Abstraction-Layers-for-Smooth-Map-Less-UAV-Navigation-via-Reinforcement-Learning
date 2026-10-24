@@ -5,8 +5,8 @@ Bounded, continuous reward over the paper's body-frame velocity action
     R = r_progress + r_obs + r_yaw + r_jerk + r_time + r_terminal
 
 Every per-step term is bounded (r_progress in [-1, 1], r_obs in [-2, 0],
-r_yaw in [-0.1, 0.1], r_jerk and r_time tiny), and the terminal payouts are
-+100 / -60 / -10, so an episode return stays in a range a value head can
+r_yaw in [-0.1, 0], r_jerk and r_time tiny), and the terminal payouts are
++100 / -60 / -60, so an episode return stays in a range a value head can
 actually fit. Obstacle avoidance is learned by the policy itself from this
 signal -- there is no heuristic shield term and no one-off milestone payouts.
 """
@@ -62,7 +62,7 @@ def compute_reward(
 
     # --- Target-facing alignment (Eq. 19-20) ---
     e_theta = yaw_alignment_error_deg(current_yaw_deg, dx, dy)
-    r_yaw = config.YAW_ALIGN_COEFF * (1.0 - 2.0 * e_theta / 180.0)
+    r_yaw = -config.YAW_ALIGN_COEFF * e_theta / 180.0
 
     # --- Jerk regularization (Eq. 23-24), penalizing abrupt commands ---
     r_jerk = -config.JERK_COEFF * float(np.linalg.norm(cmd_target - cmd_smooth))
