@@ -151,14 +151,21 @@ CAMERA_NAME = "0"              # front FPV camera id
 # fast enough that flight still looks smooth.
 ACTION_DURATION = 0.3
 
-# Synchronous stepping: the simulator is paused between steps and advanced by
-# exactly ACTION_DURATION of *simulated* time per step (simContinueForTime), so
-# camera/U-Net/LiDAR processing takes zero sim time and the drone never has
-# time to coast/brake while Python thinks. The velocity command is issued with
-# COMMAND_HOLD_DURATION (>> ACTION_DURATION) so it never expires mid-step: the
-# drone keeps its last commanded velocity until the next command replaces it.
-# Set False to fall back to the old real-time stepping (join() on a 0.3 s command).
-SYNC_STEPPING = True
+# Real-time stepping (default, SYNC_STEPPING = False): the simulator keeps
+# running while Python reads the camera/U-Net/LiDAR and runs the policy. Each
+# velocity command is sent with COMMAND_HOLD_DURATION (>> a step), without
+# waiting for it, so it never expires: the drone keeps flying on its last
+# command until the next one replaces it (no coast/brake between steps).
+# ACTION_DURATION is then the *minimum* wall-clock time between sensor reads
+# (the loop sleeps if it finishes early); real steps can be longer when
+# processing is slow, and the reward's progress term uses the measured
+# elapsed time per step. Processing latency is therefore part of training,
+# as it will be on real hardware.
+#
+# SYNC_STEPPING = True instead pauses the sim between steps and advances it by
+# exactly ACTION_DURATION of simulated time (simContinueForTime), for
+# deterministic, latency-free stepping (only for comparison/debugging).
+SYNC_STEPPING = False
 COMMAND_HOLD_DURATION = 5.0
 
 # --------------------------------------------------------------------------

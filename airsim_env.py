@@ -25,6 +25,7 @@ given, a goal is sampled randomly (useful for training generalizable policies).
 """
 
 import math
+import time
 
 import numpy as np
 import cv2
@@ -71,6 +72,7 @@ class AirSimUAVEnv(gym.Env):
         self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)  # [v_forward,v_lateral,yaw_rate]
         self._prev_action = np.zeros(config.ACTION_DIM, dtype=np.float32)
         self._vz_smooth = 0.0
+        self._last_sense_time = time.perf_counter()  # wall-clock time of the previous sensor read
         self._last_pos = np.array(config.START_POSITION, dtype=np.float32)
         self._prev_dist = None
         self._step_count = 0
@@ -137,6 +139,7 @@ class AirSimUAVEnv(gym.Env):
             self.client.simPause(True)
 
         pos, yaw_deg = self._get_pose()
+        self._last_sense_time = time.perf_counter()
         self._last_pos = pos.copy()
         dx, dy, dz = self._relative_target(pos)
         self._prev_dist = math.sqrt(dx ** 2 + dy ** 2)
@@ -178,26 +181,33 @@ class AirSimUAVEnv(gym.Env):
         self._vz_smooth = (1 - config.VZ_ALPHA) * self._vz_smooth + config.VZ_ALPHA * vz_target
         vz = float(self._vz_smooth)
 
-        move = self.client.moveByVelocityBodyFrameAsync(
+        # Long-lived command, not waited on: the drone keeps flying on it until
+        # the next step's command replaces it, so it never coasts/brakes while
+        # Python processes sensors.
+        self.client.moveByVelocityBodyFrameAsync(
             v_forward,
             v_lateral,
             vz,
-            config.COMMAND_HOLD_DURATION if config.SYNC_STEPPING else config.ACTION_DURATION,
+            config.COMMAND_HOLD_DURATION,
             drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
             yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate_deg),
             vehicle_name=self.vehicle_name,
         )
         if config.SYNC_STEPPING:
-            # advance exactly ACTION_DURATION of sim time, then freeze again; the
-            # (long) command stays active, so the drone holds this velocity
-            # until the next step's command replaces it
+            # advance exactly ACTION_DURATION of sim time, then freeze again
             self.client.simContinueForTime(config.ACTION_DURATION)
+            dt = config.ACTION_DURATION
         else:
-            move.join()
+            # let the command act for at least ACTION_DURATION since the last
+            # sensor read; if policy + processing already took longer, don't wait
+            remaining = config.ACTION_DURATION - (time.perf_counter() - self._last_sense_time)
+            if remaining > 0:
+                time.sleep(remaining)
 
         self._step_count += 1
 
         pos, yaw_deg = self._get_pose()
+        t_pose = time.perf_counter()  # the position (hence d_curr) is as of this moment
         self._last_pos = pos.copy()
         dx, dy, dz = self._relative_target(pos)
         d_curr = math.sqrt(dx ** 2 + dy ** 2)
@@ -219,6 +229,10 @@ class AirSimUAVEnv(gym.Env):
         collided = bool(collision_info.has_collided and collision_info.time_stamp != self._collision_baseline_ts)
         timed_out = self._step_count >= config.MAX_EPISODE_STEPS
 
+        if not config.SYNC_STEPPING:
+            dt = t_pose - self._last_sense_time
+            self._last_sense_time = t_pose
+
         reward, info = compute_reward(
             d_prev=self._prev_dist,
             d_curr=d_curr,
@@ -230,6 +244,7 @@ class AirSimUAVEnv(gym.Env):
             occupancy_grid=grid,
             collided=collided,
             timed_out=timed_out,
+            dt=dt,
             lidar_front_m=lidar_front_m,
             lidar_global_m=lidar_global_m,
         )
