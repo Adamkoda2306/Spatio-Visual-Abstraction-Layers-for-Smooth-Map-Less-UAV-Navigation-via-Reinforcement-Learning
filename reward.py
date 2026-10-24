@@ -35,8 +35,8 @@ def compute_reward(
     current_yaw_deg: float,
     dx: float,
     dy: float,
-    cmd_smooth: np.ndarray,       # smoothed [v_forward,v_lateral,yaw_rate] command, in [-1,1]
-    cmd_target: np.ndarray,       # raw (pre-smoothing) [v_forward,v_lateral,yaw_rate] command
+    action: np.ndarray,           # this step's raw [v_forward,v_lateral,yaw_rate] action, in [-1,1]
+    prev_action: np.ndarray,      # previous step's raw action (zeros on the first step)
     occupancy_grid: np.ndarray,   # 5x5 matrix G (logged only, not rewarded)
     collided: bool,
     timed_out: bool,
@@ -64,8 +64,10 @@ def compute_reward(
     e_theta = yaw_alignment_error_deg(current_yaw_deg, dx, dy)
     r_yaw = -config.YAW_ALIGN_COEFF * e_theta / 180.0
 
-    # --- Jerk regularization (Eq. 23-24), penalizing abrupt commands ---
-    r_jerk = -config.JERK_COEFF * float(np.linalg.norm(cmd_target - cmd_smooth))
+    # --- Action-change (jerk) penalty (Eq. 23-24) ---
+    # Cost on how much the raw action changed since the last step, so the
+    # policy itself learns smooth outputs instead of relying on the EMA filter.
+    r_jerk = -config.JERK_COEFF * float(np.linalg.norm(action - prev_action))
 
     # --- Step decay ---
     r_time = config.R_TIME

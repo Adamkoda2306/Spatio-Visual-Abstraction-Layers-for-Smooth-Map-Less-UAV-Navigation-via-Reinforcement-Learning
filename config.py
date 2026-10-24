@@ -93,7 +93,7 @@ SUCCESS_RADIUS = 2.0          # meters
 MAX_EPISODE_STEPS = 600        # shorter episodes -> more terminal-reward samples per training budget
 YAW_ALIGN_COEFF = 0.1         # r_yaw = -coeff * |heading error| / 180, in [-coeff, 0]; a pure cost, so just
                               # staying alive facing the goal earns nothing
-JERK_COEFF = 0.01             # r_jerk = -coeff * ||cmd_target - cmd_smooth||
+JERK_COEFF = 0.15             # r_jerk = -coeff * ||a_t - a_{t-1}||: penalizes change between consecutive raw actions
 
 # Single smooth LiDAR barrier on the nearest frontal range (meters):
 #   b(r)  = max(0, 1 - r / LIDAR_SAFE_DIST)
@@ -117,6 +117,7 @@ GOAL_OBS_SCALE = 200.0
 # Eq. 13 altitude hold: vz = clip(-(z + H_MAX), -VZ_MAX, VZ_MAX), applied
 # directly (no EMA) so altitude corrections are immediate.
 VZ_MAX = 2.0
+VZ_ALPHA = 0.5   # light EMA on the vertical velocity command (1.0 = no filtering) to avoid bobbing
 
 # --------------------------------------------------------------------------
 # Perception-driven safety shield (airsim_env.py only -- does NOT touch the
@@ -149,6 +150,16 @@ CAMERA_NAME = "0"              # front FPV camera id
 # top of this duration. Lower it only if your machine's per-step loop is
 # fast enough that flight still looks smooth.
 ACTION_DURATION = 0.3
+
+# Synchronous stepping: the simulator is paused between steps and advanced by
+# exactly ACTION_DURATION of *simulated* time per step (simContinueForTime), so
+# camera/U-Net/LiDAR processing takes zero sim time and the drone never has
+# time to coast/brake while Python thinks. The velocity command is issued with
+# COMMAND_HOLD_DURATION (>> ACTION_DURATION) so it never expires mid-step: the
+# drone keeps its last commanded velocity until the next command replaces it.
+# Set False to fall back to the old real-time stepping (join() on a 0.3 s command).
+SYNC_STEPPING = True
+COMMAND_HOLD_DURATION = 5.0
 
 # --------------------------------------------------------------------------
 # Target / episode sampling (AirSimNH suburban block, NED frame, meters)

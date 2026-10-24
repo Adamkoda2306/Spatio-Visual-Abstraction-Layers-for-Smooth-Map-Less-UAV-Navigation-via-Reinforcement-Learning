@@ -69,6 +69,8 @@ class AirSimUAVEnv(gym.Env):
 
         self._goal = np.zeros(3, dtype=np.float32)
         self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)  # [v_forward,v_lateral,yaw_rate]
+        self._prev_action = np.zeros(config.ACTION_DIM, dtype=np.float32)
+        self._vz_smooth = 0.0
         self._last_pos = np.array(config.START_POSITION, dtype=np.float32)
         self._prev_dist = None
         self._step_count = 0
@@ -88,6 +90,10 @@ class AirSimUAVEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
 
+        # takeoff/climb below need simulated time to run, so un-pause for the reset
+        # sequence and re-pause at its end (see config.SYNC_STEPPING).
+        if config.SYNC_STEPPING:
+            self.client.simPause(False)
         self.client.reset()
         self.client.enableApiControl(True, self.vehicle_name)
         self.client.armDisarm(True, self.vehicle_name)
@@ -118,12 +124,17 @@ class AirSimUAVEnv(gym.Env):
         self._collision_baseline_ts = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name).time_stamp
 
         self._cmd_smooth = np.zeros(config.ACTION_DIM, dtype=np.float32)
+        self._prev_action = np.zeros(config.ACTION_DIM, dtype=np.float32)
+        self._vz_smooth = 0.0
         self._step_count = 0
         self._danger_ema = 0.0
         self._steer_ema = 0.0
         self._danger_ema_l = 0.0
         self._steer_ema_l = 0.0
         self.trajectory = []
+
+        if config.SYNC_STEPPING:
+            self.client.simPause(True)
 
         pos, yaw_deg = self._get_pose()
         self._last_pos = pos.copy()
@@ -161,19 +172,28 @@ class AirSimUAVEnv(gym.Env):
 
         # Eq. 13: hold the cruise altitude H_MAX using the z recorded at the
         # end of the previous step (avoids an extra AirSim round-trip here).
-        # Direct proportional hold, no EMA: altitude is not the policy's job,
-        # so corrections must be immediate rather than lagging ~6 s behind.
-        vz = float(np.clip(-(self._last_pos[2] + config.H_MAX), -config.VZ_MAX, config.VZ_MAX))
+        # Proportional hold with only a light EMA (VZ_ALPHA): altitude is not the
+        # policy's job, so it must respond quickly, but unfiltered it bobbed.
+        vz_target = float(np.clip(-(self._last_pos[2] + config.H_MAX), -config.VZ_MAX, config.VZ_MAX))
+        self._vz_smooth = (1 - config.VZ_ALPHA) * self._vz_smooth + config.VZ_ALPHA * vz_target
+        vz = float(self._vz_smooth)
 
-        self.client.moveByVelocityBodyFrameAsync(
+        move = self.client.moveByVelocityBodyFrameAsync(
             v_forward,
             v_lateral,
             vz,
-            config.ACTION_DURATION,
+            config.COMMAND_HOLD_DURATION if config.SYNC_STEPPING else config.ACTION_DURATION,
             drivetrain=airsim.DrivetrainType.MaxDegreeOfFreedom,
             yaw_mode=airsim.YawMode(is_rate=True, yaw_or_rate=yaw_rate_deg),
             vehicle_name=self.vehicle_name,
-        ).join()
+        )
+        if config.SYNC_STEPPING:
+            # advance exactly ACTION_DURATION of sim time, then freeze again; the
+            # (long) command stays active, so the drone holds this velocity
+            # until the next step's command replaces it
+            self.client.simContinueForTime(config.ACTION_DURATION)
+        else:
+            move.join()
 
         self._step_count += 1
 
@@ -205,8 +225,8 @@ class AirSimUAVEnv(gym.Env):
             current_yaw_deg=yaw_deg,
             dx=dx,
             dy=dy,
-            cmd_smooth=self._cmd_smooth,
-            cmd_target=cmd_target,
+            action=action,
+            prev_action=self._prev_action,
             occupancy_grid=grid,
             collided=collided,
             timed_out=timed_out,
@@ -215,6 +235,7 @@ class AirSimUAVEnv(gym.Env):
         )
 
         self._prev_dist = d_curr
+        self._prev_action = action.copy()
         self.trajectory.append(pos.copy())
 
         success = d_curr < config.SUCCESS_RADIUS
@@ -270,6 +291,8 @@ class AirSimUAVEnv(gym.Env):
 
     def close(self):
         try:
+            if config.SYNC_STEPPING:
+                self.client.simPause(False)
             self.client.armDisarm(False, self.vehicle_name)
             self.client.enableApiControl(False, self.vehicle_name)
         except Exception:
