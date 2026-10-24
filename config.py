@@ -155,8 +155,12 @@ ACTION_DURATION = 0.3
 # running while Python reads the camera/U-Net/LiDAR and runs the policy. Each
 # velocity command is sent with COMMAND_HOLD_DURATION (>> a step), without
 # waiting for it, so it never expires: the drone keeps flying on its last
-# command until the next one replaces it (no coast/brake between steps). A
-# step is as long as sensing + policy inference take; there is no pacing sleep.
+# command until the next one replaces it (no coast/brake between steps).
+# ACTION_DURATION is then the *minimum* wall-clock time between sensor reads
+# (the loop sleeps if it finishes early); real steps can be longer when
+# processing is slow, and the reward's progress term uses the measured
+# elapsed time per step. Processing latency is therefore part of training,
+# as it will be on real hardware.
 #
 # SYNC_STEPPING = True instead pauses the sim between steps and advances it by
 # exactly ACTION_DURATION of simulated time (simContinueForTime), for
